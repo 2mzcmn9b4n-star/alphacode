@@ -504,8 +504,8 @@ impl SeriesStats {
 
         stats.mean_chunk = chunk_sum / chunk_count as f64;
         stats.chunk_cv = if chunk_count >= 2 {
-            let var = (chunk_sum_sq - chunk_sum * chunk_sum / chunk_count as f64)
-                / chunk_count as f64;
+            let var =
+                (chunk_sum_sq - chunk_sum * chunk_sum / chunk_count as f64) / chunk_count as f64;
             var.sqrt() / stats.mean_chunk
         } else {
             0.0
@@ -534,11 +534,8 @@ impl SeriesStats {
             } else {
                 0.0
             };
-            stats.bucket_100ms_max_chars = bucket_chars
-                .iter()
-                .copied()
-                .fold(0.0_f64, f64::max)
-                .round() as usize;
+            stats.bucket_100ms_max_chars =
+                bucket_chars.iter().copied().fold(0.0_f64, f64::max).round() as usize;
         }
 
         stats
@@ -556,8 +553,6 @@ pub struct StreamJitterProfile {
     pub text_arrivals: SeriesStats,
     pub text_reveals: SeriesStats,
 }
-
-
 
 #[cfg(test)]
 mod tests {

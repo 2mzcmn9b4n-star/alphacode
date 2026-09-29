@@ -149,8 +149,15 @@ const MAX_READ_ONLY_ACTIONS: u32 = 3;
 fn is_read_only_action(action: &str) -> bool {
     matches!(
         action,
-        "snapshot" | "get_content" | "list_tabs" | "get_active_tab" | "list_frames"
-            | "interactables" | "screenshot" | "get_cookies" | "list_cookies"
+        "snapshot"
+            | "get_content"
+            | "list_tabs"
+            | "get_active_tab"
+            | "list_frames"
+            | "interactables"
+            | "screenshot"
+            | "get_cookies"
+            | "list_cookies"
     )
 }
 
@@ -158,9 +165,22 @@ fn is_read_only_action(action: &str) -> bool {
 fn is_state_changing_action(action: &str) -> bool {
     matches!(
         action,
-        "open" | "click" | "hover" | "type" | "fill_form" | "select" | "drag_and_drop"
-            | "press" | "scroll" | "upload" | "set_cookies" | "delete_cookie" | "close_tab"
-            | "reload" | "go_back" | "go_forward"
+        "open"
+            | "click"
+            | "hover"
+            | "type"
+            | "fill_form"
+            | "select"
+            | "drag_and_drop"
+            | "press"
+            | "scroll"
+            | "upload"
+            | "set_cookies"
+            | "delete_cookie"
+            | "close_tab"
+            | "reload"
+            | "go_back"
+            | "go_forward"
     )
 }
 
@@ -2403,9 +2423,7 @@ fn render_browser_output(action: &str, title: String, result: Value) -> ToolOutp
         "list_cookies" => format_cookie_string_result(&result),
         "get_cookies" => {
             // Extract domain filter from result metadata if provided
-            let domain_filter = result
-                .get("domain")
-                .and_then(|v| v.as_str());
+            let domain_filter = result.get("domain").and_then(|v| v.as_str());
             format_cookies_result(&result, domain_filter)
         }
         "set_cookies" => format_set_cookies_result(&result),

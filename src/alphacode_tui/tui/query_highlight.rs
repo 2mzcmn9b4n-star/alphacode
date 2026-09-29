@@ -126,7 +126,10 @@ pub fn highlight_within(
         return Vec::new();
     }
 
-    let widths: Vec<usize> = chars.iter().map(|c| unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0)).collect();
+    let widths: Vec<usize> = chars
+        .iter()
+        .map(|c| unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0))
+        .collect();
     let total: usize = widths.iter().sum();
     let matched = matched_char_indices(text, query);
 

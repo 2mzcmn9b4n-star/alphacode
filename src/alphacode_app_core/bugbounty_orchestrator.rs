@@ -126,8 +126,8 @@ impl BugBountyOrchestrator {
     ///
     /// Returns the tool to use (either the original or an alternative).
     pub async fn resolve_tool(&self, tool: &str) -> String {
-        use crate::alphacode_app_core::bugbounty_doctor::which;
         use crate::alphacode_app_core::bugbounty_doctor::ToolStatus;
+        use crate::alphacode_app_core::bugbounty_doctor::which;
 
         if let ToolStatus::Present { .. } = which(tool) {
             return tool.to_string();
@@ -148,7 +148,11 @@ impl BugBountyOrchestrator {
         };
 
         if let ToolStatus::Present { .. } = which(alternative) {
-            tracing::info!("Tool '{}' not found, using alternative '{}'", tool, alternative);
+            tracing::info!(
+                "Tool '{}' not found, using alternative '{}'",
+                tool,
+                alternative
+            );
             return alternative.to_string();
         }
 
@@ -159,7 +163,9 @@ impl BugBountyOrchestrator {
 
     /// Ensure all required tools are installed, auto-installing if possible.
     pub async fn ensure_tools_installed(&self) {
-        use crate::alphacode_app_core::bugbounty_install::{ensure_go_installed, install_one, plan_for};
+        use crate::alphacode_app_core::bugbounty_install::{
+            ensure_go_installed, install_one, plan_for,
+        };
 
         // First ensure Go is installed
         ensure_go_installed().await;

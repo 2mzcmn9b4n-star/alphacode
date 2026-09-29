@@ -152,8 +152,7 @@ pub(crate) fn preserve_line_oriented_softbreaks(text: &str) -> String {
     while let Some(line) = lines.next() {
         let next_line = lines.peek().copied();
         let prev_log_like = prev_line.is_some_and(looks_like_line_oriented_transcript_line);
-        let next_log_like =
-            next_line.is_some_and(looks_like_line_oriented_transcript_line);
+        let next_log_like = next_line.is_some_and(looks_like_line_oriented_transcript_line);
         let line_log_like = looks_like_line_oriented_transcript_line(line);
         let entering_log_block = !in_code_fence
             && line_log_like

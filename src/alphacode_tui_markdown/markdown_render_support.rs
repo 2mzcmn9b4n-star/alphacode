@@ -410,7 +410,12 @@ pub(super) fn highlight_code_cached(code: &str, lang: Option<&str>) -> Vec<Line<
         const HIGHLIGHT_CACHE_MAX: usize = 512;
         if cache.entries.len() >= HIGHLIGHT_CACHE_MAX {
             // Clear half the cache when full (simple eviction)
-            let keys: Vec<u64> = cache.entries.keys().take(HIGHLIGHT_CACHE_MAX / 2).copied().collect();
+            let keys: Vec<u64> = cache
+                .entries
+                .keys()
+                .take(HIGHLIGHT_CACHE_MAX / 2)
+                .copied()
+                .collect();
             for k in keys {
                 cache.entries.remove(&k);
             }

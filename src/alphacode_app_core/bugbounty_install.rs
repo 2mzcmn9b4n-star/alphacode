@@ -372,10 +372,17 @@ pub async fn ensure_go_installed() -> bool {
     let result = if cfg!(windows) {
         // Try winget first
         let mut cmd = tokio::process::Command::new("winget");
-        cmd.args(["install", "--id", "GoLang.Go", "-e", "--accept-source-agreements", "--accept-package-agreements"])
-            .kill_on_drop(true)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        cmd.args([
+            "install",
+            "--id",
+            "GoLang.Go",
+            "-e",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+        ])
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
         tokio::time::timeout(INSTALL_TIMEOUT, cmd.output()).await
     } else if cfg!(target_os = "macos") {
         // Try brew first
@@ -402,7 +409,10 @@ pub async fn ensure_go_installed() -> bool {
             if let Some(dir) = go_bin_dir() {
                 let existing = std::env::var("PATH").unwrap_or_default();
                 let sep = if cfg!(windows) { ';' } else { ':' };
-                if !existing.split(sep).any(|p| p.eq_ignore_ascii_case(&dir.to_string_lossy())) {
+                if !existing
+                    .split(sep)
+                    .any(|p| p.eq_ignore_ascii_case(&dir.to_string_lossy()))
+                {
                     unsafe {
                         std::env::set_var("PATH", format!("{}{}{}", dir.display(), sep, existing));
                     }

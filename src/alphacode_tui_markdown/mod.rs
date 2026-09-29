@@ -450,8 +450,6 @@ impl HighlightCache {
     fn get(&self, hash: u64) -> Option<&Vec<Line<'static>>> {
         self.entries.get(&hash)
     }
-
-
 }
 
 /// Hash code content and language for cache keying.

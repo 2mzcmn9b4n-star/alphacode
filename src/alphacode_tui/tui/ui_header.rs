@@ -1212,7 +1212,12 @@ fn build_working_dir_line(app: &dyn TuiState, w: usize, align: Alignment) -> Opt
             let branch_part = format!("  \u{2442} {}", branch);
             let spans = vec![
                 Span::styled(dir_part, Style::default().fg(BrandTheme::accent())),
-                Span::styled(branch_part, Style::default().fg(BrandTheme::success()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    branch_part,
+                    Style::default()
+                        .fg(BrandTheme::success())
+                        .add_modifier(Modifier::BOLD),
+                ),
             ];
             // Ensure total width fits
             let total_width: usize = spans
@@ -1327,8 +1332,6 @@ pub(super) fn build_header_sections(
     )
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1438,7 +1441,10 @@ mod tests {
     #[test]
     fn animated_separator_produces_output() {
         let line = build_animated_separator(80, 0.0);
-        assert!(!line.spans.is_empty(), "animated separator should produce output");
+        assert!(
+            !line.spans.is_empty(),
+            "animated separator should produce output"
+        );
     }
 
     #[test]
@@ -1491,7 +1497,10 @@ mod tests {
     #[test]
     fn animated_separator_produces_output() {
         let line = build_animated_separator(80, 0.0);
-        assert!(!line.spans.is_empty(), "animated separator should produce output");
+        assert!(
+            !line.spans.is_empty(),
+            "animated separator should produce output"
+        );
     }
 
     #[test]
@@ -1620,7 +1629,10 @@ mod tests {
     #[test]
     fn animated_separator_produces_output() {
         let line = build_animated_separator(80, 0.0);
-        assert!(!line.spans.is_empty(), "animated separator should produce output");
+        assert!(
+            !line.spans.is_empty(),
+            "animated separator should produce output"
+        );
     }
 
     #[test]
@@ -1712,7 +1724,10 @@ mod tests {
     #[test]
     fn animated_separator_produces_output() {
         let line = build_animated_separator(80, 0.0);
-        assert!(!line.spans.is_empty(), "animated separator should produce output");
+        assert!(
+            !line.spans.is_empty(),
+            "animated separator should produce output"
+        );
     }
 
     #[test]

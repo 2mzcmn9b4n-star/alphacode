@@ -640,11 +640,7 @@ impl HttpFlowTool {
     /// Detect bot protection (Datadome, Cloudflare, etc.)
     ///
     /// Returns true if the response indicates bot protection is in place.
-    fn detect_bot_protection(
-        status: u16,
-        body: &str,
-        headers: &HashMap<String, String>,
-    ) -> bool {
+    fn detect_bot_protection(status: u16, body: &str, headers: &HashMap<String, String>) -> bool {
         // Check for common bot protection status codes
         if matches!(status, 403 | 429 | 503) {
             // Check for Datadome

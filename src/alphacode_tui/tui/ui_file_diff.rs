@@ -198,9 +198,8 @@ fn build_file_diff_cache_entry(
     file_sig: Option<FileContentSignature>,
 ) -> FileDiffViewCacheEntry {
     let diff_lines = diff_lines_for_message(msg);
-    let file_content = std::fs::read_to_string(file_path).unwrap_or_else(|e| {
-        format!("[Error reading file: {e}]")
-    });
+    let file_content =
+        std::fs::read_to_string(file_path).unwrap_or_else(|e| format!("[Error reading file: {e}]"));
     let file_ext = std::path::Path::new(file_path)
         .extension()
         .and_then(|e| e.to_str())
