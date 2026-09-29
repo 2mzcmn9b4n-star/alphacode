@@ -186,27 +186,49 @@ impl JwtTool {
             return Err(anyhow::anyhow!("Invalid JWT format"));
         }
 
-        // Read wordlist
-        let words = if let Ok(content) = tokio::fs::read_to_string(wordlist_path).await {
-            content
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect::<Vec<_>>()
-        } else {
-            // Fallback: common secrets
-            vec![
-                "secret".to_string(),
-                "password".to_string(),
-                "key".to_string(),
-                "jwt_secret".to_string(),
-                "changeme".to_string(),
-                "123456".to_string(),
-                "test".to_string(),
-                "admin".to_string(),
-                "secret1".to_string(),
-                "supersecret".to_string(),
-            ]
+        // Read wordlist. A missing/unreadable file is reported loudly rather
+        // than silently swapped for 10 built-in candidates: the previous
+        // version said "Tried 10 candidates" with no hint the intended
+        // wordlist was never read, so the model correctly-but-wrongly
+        // concluded the secret was not weak. (Very common — the default path
+        // is a Linux-only location that cannot exist on Windows or macOS.)
+        let (words, degraded) = match tokio::fs::read_to_string(wordlist_path).await {
+            Ok(content) => {
+                let list: Vec<String> = content
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                if list.is_empty() {
+                    (
+                        vec![
+                            "secret".to_string(),
+                            "password".to_string(),
+                            "key".to_string(),
+                            "jwt_secret".to_string(),
+                            "changeme".to_string(),
+                        ],
+                        Some("the wordlist file was empty".to_string()),
+                    )
+                } else {
+                    (list, None)
+                }
+            }
+            Err(e) => (
+                vec![
+                    "secret".to_string(),
+                    "password".to_string(),
+                    "key".to_string(),
+                    "jwt_secret".to_string(),
+                    "changeme".to_string(),
+                    "123456".to_string(),
+                    "test".to_string(),
+                    "admin".to_string(),
+                    "secret1".to_string(),
+                    "supersecret".to_string(),
+                ],
+                Some(format!("could not read `{wordlist_path}`: {e}")),
+            ),
         };
 
         let signing_input = format!("{}.{}", parts[0], parts[1]);
@@ -225,9 +247,21 @@ impl JwtTool {
             }
         }
 
+        // This is NOT a clean negative unless the intended wordlist was
+        // actually used.
+        let caveat = match degraded {
+            Some(reason) => format!(
+                "\n\nWARNING: {reason}. Only {} built-in candidates were tried, so this is \
+                 NOT evidence that the secret is strong. Supply a real wordlist via the \
+                 `wordlist` parameter before drawing any conclusion.",
+                words.len()
+            ),
+            None => String::new(),
+        };
         Ok(ToolOutput::new(format!(
-            "No matching secret found.\nTried {} candidates.\n\nTip: Provide a custom wordlist with the wordlist parameter.",
-            words.len()
+            "No matching secret found.\nTried {} candidates.{}\n\nTip: Provide a custom wordlist with the wordlist parameter.",
+            words.len(),
+            caveat
         )))
     }
 
@@ -266,7 +300,11 @@ impl JwtTool {
             ));
         };
 
-        let token = format!("{}.{}.{}", header_b64, payload_b64, signature);
+        let token = if signature.is_empty() {
+            format!("{header_b64}.{payload_b64}")
+        } else {
+            format!("{header_b64}.{payload_b64}.{signature}")
+        };
 
         let mut output = format!("=== FORGED TOKEN ===\n{}\n\n", token);
         output.push_str("=== HEADER ===\n");
@@ -382,7 +420,12 @@ impl JwtTool {
             }
         };
 
-        let token = format!("{}.{}.{}", header_b64, payload_b64, signature);
+        // Same unsecured-JWS rule as `forge_token`: no trailing dot.
+        let token = if signature.is_empty() {
+            format!("{header_b64}.{payload_b64}")
+        } else {
+            format!("{header_b64}.{payload_b64}.{signature}")
+        };
 
         Ok(ToolOutput::new(format!(
             "=== SIGNED TOKEN ({}) ===\n{}\n\n=== SECRET ===\n{}",

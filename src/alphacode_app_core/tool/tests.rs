@@ -39,6 +39,98 @@ fn input_validation_errors_are_not_repeatable_execution_failures() {
     assert!(!super::is_input_validation_error(&runtime));
 }
 
+/// An empty call is the most common malformed shape, and the old
+/// copy-pasted formatter rendered it as the useless
+/// "missing field `file_path`. Received keys: ." — which named no fields and
+/// gave the model nothing to correct.
+#[test]
+fn empty_arguments_are_described_actionably() {
+    let described = super::describe_received_arguments(&json!({}));
+    assert!(described.contains("no arguments at all"), "{described}");
+    assert!(
+        !described.contains("Received keys: ."),
+        "must not render the garbled empty list: {described}"
+    );
+
+    // Keys present: list them so a typo is visible.
+    let keys = super::describe_received_arguments(&json!({"filepath": "a.txt", "body": "x"}));
+    assert!(keys.contains("`body`"), "{keys}");
+    assert!(keys.contains("`filepath`"), "{keys}");
+
+    // Wrong top-level type: say what arrived instead.
+    let wrong = super::describe_received_arguments(&json!("just a string"));
+    assert!(wrong.contains("a string"), "{wrong}");
+
+    let null = super::describe_received_arguments(&Value::Null);
+    assert!(null.contains("null"), "{null}");
+}
+
+#[test]
+fn schema_call_hint_names_every_required_field_with_a_usable_example() {
+    let schema = json!({
+        "type": "object",
+        "required": ["file_path", "content"],
+        "properties": {
+            "file_path": {"type": "string"},
+            "content": {"type": "string"},
+            "append": {"type": "boolean"},
+        }
+    });
+    let hint = super::schema_call_hint(&schema).expect("hint");
+    assert!(hint.contains("\"file_path\": \"...\""), "{hint}");
+    assert!(hint.contains("\"content\": \"...\""), "{hint}");
+    assert!(
+        !hint.contains("append"),
+        "optional fields must not be demanded: {hint}"
+    );
+
+    let mixed = json!({
+        "type": "object",
+        "required": ["action", "limit", "all_frames"],
+        "properties": {
+            "action": {"type": "string"},
+            "limit": {"type": "integer"},
+            "all_frames": {"type": "boolean"},
+        }
+    });
+    let hint = super::schema_call_hint(&mixed).expect("hint");
+    assert!(hint.contains("\"limit\": 0"), "{hint}");
+    assert!(hint.contains("\"all_frames\": false"), "{hint}");
+
+    // A schema with no required list must not produce a misleading hint.
+    assert!(super::schema_call_hint(&json!({"type": "object"})).is_none());
+}
+
+/// End-to-end: the very first malformed call must state the tool's whole
+/// required contract, not one field at a time.
+#[tokio::test]
+async fn a_malformed_call_reports_the_tools_full_required_contract() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let session = format!("schema-hint-{}", std::process::id());
+    let ctx = ToolContext {
+        session_id: session.clone(),
+        message_id: "message".to_string(),
+        tool_call_id: "tool".to_string(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+    };
+
+    let error = registry
+        .execute("write", json!({}), ctx)
+        .await
+        .expect_err("empty write call should fail validation");
+    let message = error.to_string();
+    assert!(message.contains("file_path"), "{message}");
+    assert!(
+        message.contains("\"content\""),
+        "both required fields must be named at once: {message}"
+    );
+    clear_session_tool_policy(&session);
+}
+
 #[tokio::test]
 async fn repeated_missing_bash_command_stays_correctable_until_arguments_change() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -65,6 +157,114 @@ async fn repeated_missing_bash_command_stays_correctable_until_arguments_change(
         .expect("corrected bash call should execute");
     assert!(corrected.output.contains("ok"));
     clear_session_tool_policy(&format!("bash-validation-{}", std::process::id()));
+}
+
+#[test]
+fn required_argument_contract_names_mandatory_fields_once() {
+    let schema = json!({
+        "type": "object",
+        "required": ["file_path", "content"],
+        "properties": {"file_path": {}, "content": {}}
+    });
+    let contract = super::required_argument_contract(&schema, "Create or overwrite a file.")
+        .expect("contract");
+    assert!(contract.contains("`file_path`"), "{contract}");
+    assert!(contract.contains("`content`"), "{contract}");
+    assert!(
+        contract.starts_with(' '),
+        "must append, not replace: {contract}"
+    );
+
+    // A tool with no required fields gets nothing appended.
+    let optional = json!({"type": "object", "properties": {"path": {}}});
+    assert!(super::required_argument_contract(&optional, "List a directory.").is_none());
+
+    // No repetition when the prose already names every required field.
+    let already = "Write takes file_path and content.";
+    assert!(super::required_argument_contract(&schema, already).is_none());
+
+    // Partially-named prose still gets the full contract, since the model
+    // needs to see the one it is missing.
+    let partial =
+        super::required_argument_contract(&schema, "Write takes file_path.").expect("contract");
+    assert!(partial.contains("`content`"), "{partial}");
+}
+
+/// The prompt budget is hard: a description that already fills it must not be
+/// made any longer, because every request pays for it.
+#[test]
+fn required_argument_contract_yields_to_the_prompt_budget() {
+    let schema = json!({
+        "type": "object",
+        "required": ["command"],
+        "properties": {"command": {"type": "string"}}
+    });
+    // `estimate_tokens` is chars/4, so this lands exactly on the cap.
+    let filler = "x".repeat(super::TOOL_DESCRIPTION_TOKEN_CAP * 4);
+    assert_eq!(
+        crate::util::estimate_tokens(&filler),
+        super::TOOL_DESCRIPTION_TOKEN_CAP
+    );
+    assert!(
+        super::required_argument_contract(&schema, &filler).is_none(),
+        "must not append past the cap"
+    );
+}
+
+#[tokio::test]
+async fn tool_definitions_state_their_required_arguments() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let defs = registry.definitions(None).await;
+
+    let write = defs
+        .iter()
+        .find(|def| def.name == "write")
+        .expect("write definition");
+    assert!(
+        write.description.contains("`file_path`") && write.description.contains("`content`"),
+        "the model must see the contract: {}",
+        write.description
+    );
+
+    // The schema itself must keep its `required` array untouched.
+    assert!(write.input_schema.get("required").is_some());
+}
+
+/// Generating the contract must never breach the always-on prompt budget, so
+/// a tool whose own guidance already fills the cap keeps its schema contract
+/// and gains no extra prose.
+#[tokio::test]
+async fn generated_contracts_never_breach_the_description_budget() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    for def in registry.definitions(None).await {
+        let exempt = matches!(def.name.as_str(), "discover_tools" | "swarm");
+        if exempt {
+            continue;
+        }
+        assert!(
+            def.description_token_estimate() <= super::TOOL_DESCRIPTION_TOKEN_CAP,
+            "{} is at {} tokens, over the {} cap: {}",
+            def.name,
+            def.description_token_estimate(),
+            super::TOOL_DESCRIPTION_TOKEN_CAP,
+            def.description
+        );
+    }
+}
+
+/// Prompt caching breaks if the definition text varies between calls, so the
+/// generated contract has to be stable.
+#[tokio::test]
+async fn generated_tool_contracts_are_deterministic() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let first = registry.definitions(None).await;
+    let second = registry.definitions(None).await;
+    let first: Vec<_> = first.iter().map(|d| d.description.clone()).collect();
+    let second: Vec<_> = second.iter().map(|d| d.description.clone()).collect();
+    assert_eq!(first, second);
 }
 
 #[tokio::test]
@@ -494,8 +694,9 @@ async fn tool_descriptions_stay_under_token_cap() {
     // 250 tokens covers `bash`'s cross-platform shell guidance (POSIX syntax,
     // Git Bash on Windows, anti-cmd.exe/PowerShell confusion) and
     // `webfetch`'s authorization context without losing the operational
-    // prompts that make the tools hard to misuse.
-    const DESCRIPTION_TOKEN_CAP: usize = 250;
+    // prompts that make the tools hard to misuse. Shared with the generator
+    // that appends the required-argument contract, so the two cannot drift.
+    const DESCRIPTION_TOKEN_CAP: usize = super::TOOL_DESCRIPTION_TOKEN_CAP;
     // discover_tools keeps a deliberate second sentence disclosing that catalog
     // entries are vetted/partnered integrations.
     // swarm appends the user-tunable swarm-prompt.md by design.

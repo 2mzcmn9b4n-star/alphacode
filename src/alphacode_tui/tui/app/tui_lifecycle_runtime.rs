@@ -548,7 +548,12 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
                     "Onboarding simulator stopped.".to_string(),
                 ));
             }
-            _ => unreachable!("guarded by command matcher"),
+            _ => {
+                app.push_display_message(DisplayMessage::system(
+                    "Usage: `/onboarding-sim`, `/onboarding-sim on`, `/onboarding-sim off`, or `/onboarding-sim status`.".to_string(),
+                ));
+                return true;
+            }
         }
         return true;
     }
@@ -593,7 +598,12 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
         let enable = match mode {
             "" | "on" => true,
             "off" => false,
-            _ => unreachable!("guarded by command matcher"),
+            _ => {
+                app.push_display_message(DisplayMessage::system(
+                    "Usage: `/onboarding-preview`, `/onboarding-preview on`, `/onboarding-preview off`, or `/onboarding-preview status`.".to_string(),
+                ));
+                return true;
+            }
         };
         app.onboarding_preview_mode = enable;
         if enable {

@@ -255,34 +255,39 @@ fn memory_tile_content_lines(
                     all_chunks.extend(split_by_display_width(&remainder, cont_width));
                 }
             }
+            // Build chunk lines separately to avoid lifetime issues
+            // Use owned Strings to avoid borrowing from all_chunks
+            let mut chunk_lines: Vec<Line<'static>> = Vec::new();
             for (ci, chunk) in all_chunks.iter().enumerate() {
                 let chunk_width = unicode_width::UnicodeWidthStr::width(chunk.as_str());
+                let chunk_owned = chunk.clone();
                 if ci == 0 {
                     let padding = inner_width.saturating_sub(bullet_width + chunk_width);
                     let mut spans = vec![
                         Span::styled("│ ", border_style),
                         Span::styled(bullet.to_string(), text_fill_style),
-                        Span::styled(chunk.clone(), text_fill_style),
+                        Span::styled(chunk_owned, text_fill_style),
                     ];
                     if padding > 0 {
                         spans.push(Span::raw(" ".repeat(padding)));
                     }
                     spans.push(Span::styled(" │", border_style));
-                    content_lines.push(Line::from(spans));
+                    chunk_lines.push(Line::from(spans));
                 } else {
                     let padding = inner_width.saturating_sub(indent + chunk_width);
                     let mut spans = vec![
                         Span::styled("│ ", border_style),
                         Span::raw(" ".repeat(indent)),
-                        Span::styled(chunk.clone(), text_fill_style),
+                        Span::styled(chunk_owned, text_fill_style),
                     ];
                     if padding > 0 {
                         spans.push(Span::raw(" ".repeat(padding)));
                     }
                     spans.push(Span::styled(" │", border_style));
-                    content_lines.push(Line::from(spans));
+                    chunk_lines.push(Line::from(spans));
                 }
             }
+            content_lines.extend(chunk_lines);
         }
 
         if let Some(updated_at) = item.updated_at {

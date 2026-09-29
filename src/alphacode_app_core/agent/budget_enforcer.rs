@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::alphacode_task_types::goal_contract::{ContractPhase, GoalContract, PhaseBudgets};
+use crate::alphacode_task_types::goal_contract::{ContractPhase, GoalContract};
 
 /// Tracks per-phase call counts and wall-clock time, and enforces budgets.
 /// Also tracks consecutive failures per tool for the auxiliary-tool stop-loss.
@@ -48,10 +48,15 @@ impl BudgetEnforcer {
         self.total_calls += 1;
         self.phase_calls += 1;
 
-        // Check if the tool is degraded
+        // Check if the tool is degraded.
+        //
+        // Use `contract.phase` as the source of truth, not `self.current_phase`:
+        // `current_phase` was pinned at `Recon` forever (nothing advanced it on
+        // normal progress), so this `Report` arm was unreachable and the
+        // stop-loss only ever fired via `is_terminal()`.
         if let Some(info) = self.degraded_tools.get(tool_name) {
             // Only reject if the contract is satisfiable without this tool
-            if contract.is_terminal() || self.current_phase == ContractPhase::Report {
+            if contract.is_terminal() || contract.phase == ContractPhase::Report {
                 return BudgetVerdict::Rejected(format!(
                     "Tool '{}' is degraded ({} consecutive failures). Goal is already satisfiable without it.",
                     tool_name, info.failures
@@ -60,7 +65,7 @@ impl BudgetEnforcer {
         }
 
         // Check phase budget
-        let budget = self.budget_for_phase(contract.phase);
+        let budget = self.budget_for_phase(contract);
         let elapsed = self.phase_start.elapsed();
 
         if self.phase_calls > budget.max_calls {
@@ -88,6 +93,12 @@ impl BudgetEnforcer {
     pub fn record_result(&mut self, tool_name: &str, success: bool) {
         if success {
             self.consecutive_failures.insert(tool_name.to_string(), 0);
+            // A tool that has recovered is not degraded. Without this removal a
+            // tool that failed twice (transient DNS, a flaky endpoint) stayed in
+            // `degraded_tools` with a stale failure count for the rest of the
+            // session, and every later call was rejected with a message that was
+            // no longer true.
+            self.degraded_tools.remove(tool_name);
         } else {
             let failures = self
                 .consecutive_failures
@@ -124,16 +135,37 @@ impl BudgetEnforcer {
         }
     }
 
-    /// Get the budget for the current phase.
+    /// Start a new turn: reset the per-phase counters and adopt the contract's
+    /// current phase.
+    ///
+    /// `BudgetEnforcer` is a per-`Agent` field that lives across turns, so
+    /// without this reset `phase_calls` accumulated over an entire session.
+    /// A session doing 5 recon calls per turn tripped the 20-call `Execute`
+    /// budget after ~4 turns and was then permanently forced into `Report`.
+    pub fn begin_turn(&mut self, phase: Option<ContractPhase>) {
+        let phase = phase.unwrap_or(ContractPhase::Recon);
+        if phase != self.current_phase {
+            self.current_phase = phase;
+        }
+        self.phase_calls = 0;
+        self.phase_start = Instant::now();
+    }
+
+    /// Get the budget for a phase.
+    ///
+    /// Reads the contract's own `budgets` rather than `PhaseBudgets::default()`.
+    /// `GoalContract.budgets` is a real, serialized, per-mission field, but it
+    /// was never read here, so any budget a mission actually configured was
+    /// silently ignored and the hardcoded default was always enforced.
     fn budget_for_phase(
         &self,
-        phase: ContractPhase,
+        contract: &GoalContract,
     ) -> crate::alphacode_task_types::goal_contract::Budget {
-        let defaults = PhaseBudgets::default();
-        match phase {
-            ContractPhase::Recon => defaults.recon,
-            ContractPhase::Execute => defaults.execute,
-            ContractPhase::Verify => defaults.verify,
+        let budgets = &contract.budgets;
+        match contract.phase {
+            ContractPhase::Recon => budgets.recon.clone(),
+            ContractPhase::Execute => budgets.execute.clone(),
+            ContractPhase::Verify => budgets.verify.clone(),
             ContractPhase::Report => crate::alphacode_task_types::goal_contract::Budget {
                 max_calls: 3,
                 max_seconds: 60,
@@ -148,7 +180,7 @@ impl BudgetEnforcer {
         if contract.phase != ContractPhase::Verify {
             return false;
         }
-        let verify_budget = PhaseBudgets::default().verify;
+        let verify_budget = contract.budgets.verify.clone();
         self.phase_start.elapsed().as_secs() > verify_budget.max_seconds
     }
 
@@ -253,6 +285,76 @@ mod tests {
         enforcer.record_result("browser", true);
         assert!(!enforcer.is_degraded("browser"));
         assert_eq!(enforcer.consecutive_failures("browser"), 0);
+    }
+
+    /// A tool that reached the degraded threshold and then succeeded must be
+    /// cleared, not left degraded forever.
+    ///
+    /// `record_result_success_resets_failures` above cannot catch a missing
+    /// `degraded_tools.remove`: it only accumulates one failure before the
+    /// success, so the tool was never inserted in the first place. This one
+    /// crosses the threshold (2 failures), confirms it is degraded, then
+    /// succeeds — which is the sequence a transient failure produces.
+    #[test]
+    fn success_clears_a_tool_that_was_already_degraded() {
+        let mut enforcer = BudgetEnforcer::new();
+        enforcer.record_result("webfetch", false);
+        enforcer.record_result("webfetch", false);
+        assert!(enforcer.is_degraded("webfetch"), "2 failures must degrade");
+
+        enforcer.record_result("webfetch", true);
+        assert!(
+            !enforcer.is_degraded("webfetch"),
+            "a recovered tool must not stay degraded"
+        );
+        assert_eq!(enforcer.consecutive_failures("webfetch"), 0);
+    }
+
+    /// A degraded tool is still rejected once the goal is satisfiable without
+    /// it — and that must key off `contract.phase`, which is the only phase
+    /// source that actually advances. `current_phase` was pinned at `Recon`
+    /// forever, so this branch was previously unreachable.
+    #[test]
+    fn degraded_tool_is_rejected_in_the_report_phase() {
+        let mut enforcer = BudgetEnforcer::new();
+        enforcer.record_result("webfetch", false);
+        enforcer.record_result("webfetch", false);
+
+        let contract = make_contract(ContractPhase::Report);
+        match enforcer.record_call("webfetch", &contract) {
+            BudgetVerdict::Rejected(_) => {}
+            other => panic!("expected Rejected in the Report phase, got {other:?}"),
+        }
+    }
+
+    /// The contract's own budgets must be enforced, not the hardcoded defaults.
+    #[test]
+    fn contract_budgets_are_enforced_rather_than_defaults() {
+        let mut enforcer = BudgetEnforcer::new();
+        let mut contract = make_contract(ContractPhase::Execute);
+        // Default `execute` budget is 20 calls; make this contract much tighter.
+        contract.budgets.execute.max_calls = 2;
+
+        assert!(enforcer.record_call("read", &contract).is_allowed());
+        assert!(enforcer.record_call("read", &contract).is_allowed());
+        match enforcer.record_call("read", &contract) {
+            BudgetVerdict::OverBudget(_) => {}
+            other => panic!("expected the contract's 2-call budget to trip, got {other:?}"),
+        }
+    }
+
+    /// `begin_turn` must reset the per-phase counters, otherwise a long session
+    /// accumulates `phase_calls` across turns until it is permanently forced
+    /// into `Report`.
+    #[test]
+    fn begin_turn_resets_phase_counters() {
+        let mut enforcer = BudgetEnforcer::new();
+        let contract = make_contract(ContractPhase::Execute);
+        for _ in 0..19 {
+            enforcer.record_call("read", &contract);
+        }
+        enforcer.begin_turn(Some(ContractPhase::Execute));
+        assert!(enforcer.record_call("read", &contract).is_allowed());
     }
 
     #[test]

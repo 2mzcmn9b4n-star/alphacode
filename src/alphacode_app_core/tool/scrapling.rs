@@ -115,7 +115,12 @@ impl Tool for ScraplingTool {
             return Err(anyhow::anyhow!("URL must start with http:// or https://"));
         }
 
-        let timeout = params.timeout.unwrap_or(DEFAULT_TIMEOUT).min(MAX_TIMEOUT);
+        // `0` means "unset": forwarding it gave the Python subprocess a zero
+        // timeout and failed every fetch immediately.
+        let timeout = match params.timeout {
+            Some(0) | None => DEFAULT_TIMEOUT,
+            Some(n) => n.min(MAX_TIMEOUT),
+        };
         let format = params.format.as_deref().unwrap_or("markdown");
         let mode = params.mode.as_deref().unwrap_or("auto");
 
@@ -397,27 +402,67 @@ impl ScraplingTool {
         Ok(())
     }
 
-    /// Detect anti-bot patterns in response body
+    /// Detect anti-bot challenge pages in a response body.
+    ///
+    /// This is a *false-positive* risk, not just a false-negative one: the
+    /// marker list used to include bare words like `cloudflare` and `captcha`,
+    /// so a security write-up that merely discusses Cloudflare, or any page
+    /// with the word "captcha" on it, was reported to the model as
+    /// bot-blocked. That escalates `mode` to `browser` and burns a headless
+    /// browser for a page that was fetched perfectly well — and, worse, stamps
+    /// a false "content may be partial" caveat on real content.
+    ///
+    /// Two guards, both cheap:
+    /// * Only look at a *short* body. A real interstitial is tiny; a page that
+    ///   mentions Cloudflare in prose is not.
+    /// * Require a *strong* marker. Weak/ambiguous words only count when the
+    ///   body is very short, i.e. consistent with a challenge page.
     fn detect_anti_bot(&self, body: &str) -> bool {
         let lower = body.to_lowercase();
-        let patterns = [
+        // A challenge interstitial has essentially no content.
+        let is_short = body.split_whitespace().count() < 200;
+        if !is_short {
+            return false;
+        }
+
+        // Unambiguous challenge/interstitial signatures.
+        const STRONG: &[&str] = &[
             "cf-browser-verification",
             "checking if the site connection is secure",
             "enable javascript and cookies to continue",
-            "ray id:",
-            "cloudflare",
             "challenge-platform",
-            "just a moment",
+            "just a moment...",
             "verifying you are human",
+            "verify you are human",
             "please wait while we verify",
-            "captcha",
-            "recaptcha",
-            "hcaptcha",
-            "bot detected",
-            "automated access",
-            "access to this page has been denied",
+            "attention required! | cloudflare",
+            "checking your browser before accessing",
+            "ddos protection by",
+            "unusual traffic from your computer network",
+            // A Cloudflare Ray ID is emitted on challenge/error interstitials
+            // and is not a word that appears in ordinary security prose. It is
+            // only meaningful in a short body, which the guard above ensures.
+            "ray id:",
         ];
-        patterns.iter().any(|p| lower.contains(p))
+        if STRONG.iter().any(|p| lower.contains(p)) {
+            return true;
+        }
+
+        // Ambiguous words: only decisive on a *very* short body, where a page
+        // is essentially just the challenge.
+        if body.split_whitespace().count() < 60 {
+            const WEAK: &[&str] = &[
+                "cloudflare",
+                "captcha",
+                "recaptcha",
+                "hcaptcha",
+                "bot detected",
+                "automated access",
+                "access to this page has been denied",
+            ];
+            return WEAK.iter().any(|p| lower.contains(p));
+        }
+        false
     }
 
     // ── DOM Extraction (scraper crate) ──────────────────────────────────
@@ -593,7 +638,9 @@ impl ScraplingTool {
         timeout: u64,
     ) -> Result<PythonScraplingResult> {
         // Check if Python is available
-        let python = find_python().ok_or_else(|| anyhow::anyhow!("Python not found"))?;
+        let python = find_python()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Python not found"))?;
 
         // Check if scrapling is installed
         let check = tokio::process::Command::new(&python)
@@ -639,12 +686,22 @@ except Exception as e:
                 .arg(script_path.to_str().unwrap_or(""))
                 .arg(&params.url)
                 .arg(timeout.to_string())
+                // Without this, timing out drops the `Child` rather than
+                // killing it: the Python process (and any headless browser it
+                // spawned) kept running as an orphan, indefinitely, against a
+                // temp script that had already been reclaimed.
+                .kill_on_drop(true)
+                .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .output(),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("Scrapling Python execution timed out"))?
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Scrapling Python execution timed out after {timeout}s and was terminated"
+            )
+        })?
         .context("Failed to execute Scrapling Python script")?;
 
         // Cleanup
@@ -819,14 +876,23 @@ except Exception as e:
     }
 }
 
-/// Find available Python interpreter
-fn find_python() -> Option<String> {
-    for name in &["python3", "python", "py"] {
-        if std::process::Command::new(name)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+/// Find available Python interpreter.
+///
+/// Async, and bounded. The previous synchronous `std::process::Command` was
+/// called from an `async fn` on the `browser`/`auto` hot path, so it occupied
+/// a tokio worker thread for the whole spawn — up to three of them per call —
+/// with no timeout. A `python` on PATH that blocks (a shim that prompts, a
+/// hung launcher) blocked the runtime thread indefinitely.
+async fn find_python() -> Option<String> {
+    for name in ["python3", "python", "py"] {
+        let mut cmd = tokio::process::Command::new(name);
+        cmd.arg("--version")
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Ok(Ok(status)) = tokio::time::timeout(Duration::from_secs(5), cmd.status()).await
+            && status.success()
         {
             return Some(name.to_string());
         }
@@ -910,5 +976,43 @@ mod tests {
             tool.format_output(html, "text/html", "markdown")
                 .contains("**world**")
         );
+    }
+
+    /// Regression: `detect_anti_bot` matched bare words like `cloudflare` and
+    /// `captcha` in a body of any length, so a security write-up mentioning
+    /// Cloudflare was reported as bot-blocked. That escalates to a headless
+    /// browser and stamps a false "content may be partial" note on real
+    /// content — a false positive in the exact place the tool is supposed to
+    /// be trustworthy.
+    #[test]
+    fn anti_bot_detection_does_not_fire_on_ordinary_prose() {
+        let tool = ScraplingTool::new();
+
+        // A security blog post that merely talks about Cloudflare and captchas.
+        let prose = format!(
+            "{} Our WAF is fronted by Cloudflare. We recently added a captcha \
+             on the login form to stop credential stuffing. The hCaptcha \
+             integration was reviewed by the security team. Automated access \
+             to the API is rate limited per token.",
+            "Lorem ipsum dolor sit amet. ".repeat(40)
+        );
+        assert!(
+            !tool.detect_anti_bot(&prose),
+            "false positive on prose mentioning Cloudflare/captcha"
+        );
+    }
+
+    #[test]
+    fn anti_bot_detection_still_fires_on_real_challenge_pages() {
+        let tool = ScraplingTool::new();
+        assert!(tool.detect_anti_bot(
+            "<html><head><title>Just a moment...</title></head><body>\
+             Checking if the site connection is secure</body></html>"
+        ));
+        assert!(tool.detect_anti_bot(
+            "<html><body>Please enable JavaScript and cookies to continue. \
+             Ray ID: 8a1b2c3d</body></html>"
+        ));
+        assert!(tool.detect_anti_bot("<html><body>Verify you are human</body></html>"));
     }
 }

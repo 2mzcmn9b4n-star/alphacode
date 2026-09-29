@@ -12,10 +12,13 @@ use crate::{browser, gateway, memory, session, storage, tui};
 
 use super::{output::terminal_title, terminal::init_tui_runtime};
 
+mod bugbounty;
 mod menubar;
 mod provider_setup;
 mod report_info;
 mod restart;
+
+pub(crate) use bugbounty::run as run_bugbounty_command;
 
 pub(crate) use super::auth_test::run_post_login_validation;
 pub use super::auth_test::{
@@ -147,7 +150,12 @@ pub fn run_cloud_command(cmd: CloudSubcommand) -> Result<()> {
     }
 }
 
-pub(crate) fn run_plugin_command(cmd: super::args::PluginCommand) -> Result<()> {
+/// Note this is `async`: `run_main` is itself `async`, so it runs on a tokio
+/// worker with the runtime already entered. A `tokio::runtime::Runtime::new()
+/// .block_on(..)` here would panic with "Cannot start a runtime from within a
+/// runtime" — the nested-runtime panic — the moment `alphacode plugin install
+/// --git` was invoked. Awaiting the future directly is the fix.
+pub(crate) async fn run_plugin_command(cmd: super::args::PluginCommand) -> Result<()> {
     use super::args::PluginCommand;
     match cmd {
         PluginCommand::List { json } => {
@@ -175,10 +183,8 @@ pub(crate) fn run_plugin_command(cmd: super::args::PluginCommand) -> Result<()> 
         }
         PluginCommand::Install { path, git } => {
             if git {
-                let rt = tokio::runtime::Runtime::new()?;
-                let result = rt.block_on(
-                    crate::alphacode_app_core::plugin::install_plugin_from_git(&path),
-                )?;
+                let result =
+                    crate::alphacode_app_core::plugin::install_plugin_from_git(&path).await?;
                 println!(
                     "Installed plugin '{}' v{}",
                     result.plugin.manifest.name, result.plugin.manifest.version

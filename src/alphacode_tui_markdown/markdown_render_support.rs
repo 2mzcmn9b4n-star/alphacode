@@ -405,9 +405,17 @@ pub(super) fn highlight_code_cached(code: &str, lang: Option<&str>) -> Vec<Line<
     }
     let lines = highlight_code(code, lang);
 
-    // Store in cache for future lookups
+    // Store in cache for future lookups (with size limit)
     if let Ok(mut cache) = HIGHLIGHT_CACHE.lock() {
-        cache.insert(hash, lines.clone());
+        const HIGHLIGHT_CACHE_MAX: usize = 512;
+        if cache.entries.len() >= HIGHLIGHT_CACHE_MAX {
+            // Clear half the cache when full (simple eviction)
+            let keys: Vec<u64> = cache.entries.keys().take(HIGHLIGHT_CACHE_MAX / 2).copied().collect();
+            for k in keys {
+                cache.entries.remove(&k);
+            }
+        }
+        cache.entries.insert(hash, lines.clone());
     }
 
     lines
@@ -427,7 +435,11 @@ pub(super) fn highlight_code(code: &str, lang: Option<&str>) -> Vec<Line<'static
         .and_then(|l| SYNTAX_SET.find_syntax_by_token(l))
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
 
-    let theme = &THEME_SET.themes["base16-ocean.dark"];
+    let theme = THEME_SET
+        .themes
+        .get("base16-ocean.dark")
+        .or_else(|| THEME_SET.themes.get("base16-ocean"))
+        .unwrap_or(&THEME_SET.themes["base16-ocean.dark"]);
     let mut highlighter = HighlightLines::new(syntax, theme);
     let fallback_style = Style::default().fg(code_fg());
 
@@ -466,7 +478,11 @@ pub fn highlight_line(code: &str, ext: Option<&str>) -> Vec<Span<'static>> {
         .or_else(|| ext.and_then(|e| SYNTAX_SET.find_syntax_by_token(e)))
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
 
-    let theme = &THEME_SET.themes["base16-ocean.dark"];
+    let theme = THEME_SET
+        .themes
+        .get("base16-ocean.dark")
+        .or_else(|| THEME_SET.themes.get("base16-ocean"))
+        .unwrap_or(&THEME_SET.themes["base16-ocean.dark"]);
     let mut highlighter = HighlightLines::new(syntax, theme);
 
     match highlighter.highlight_line(code, &SYNTAX_SET) {
@@ -492,7 +508,11 @@ pub fn highlight_file_lines(
         .or_else(|| ext.and_then(|e| SYNTAX_SET.find_syntax_by_token(e)))
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
 
-    let theme = &THEME_SET.themes["base16-ocean.dark"];
+    let theme = THEME_SET
+        .themes
+        .get("base16-ocean.dark")
+        .or_else(|| THEME_SET.themes.get("base16-ocean"))
+        .unwrap_or(&THEME_SET.themes["base16-ocean.dark"]);
     let mut highlighter = HighlightLines::new(syntax, theme);
 
     let mut results = Vec::new();

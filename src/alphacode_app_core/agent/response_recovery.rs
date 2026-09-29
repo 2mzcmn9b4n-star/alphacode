@@ -219,6 +219,13 @@ impl Agent {
             attempts,
             Self::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS
         ));
+        // A free model that answers with nothing is usually a silently-broken
+        // endpoint, and re-asking the same one tends to return nothing again.
+        // Rotate after the first empty response, before spending a continuation
+        // message on a model that is not going to use it.
+        if self.maybe_rotate_free_pool_after_empty_response().is_some() {
+            return Ok(true);
+        }
         self.add_message(
             Role::User,
             vec![ContentBlock::Text {
@@ -320,6 +327,16 @@ impl Agent {
         }
         *attempts += 1;
         let attempt = *attempts;
+
+        // Free-pool rotation, before the sleep. For a rate-limited free model
+        // the backoff below is the wrong remedy: it re-sends the same request
+        // to the same throttled upstream. Switching to another free model is
+        // both faster and more likely to succeed, so it is tried first and the
+        // wait is skipped entirely.
+        if let Some(delay) = self.maybe_rotate_free_pool_model(error) {
+            return Ok(Some(delay));
+        }
+
         let delay = retry_delay_for_error(error, attempt);
         logging::warn(&format!(
             "Transient provider error; waiting {}s before retrying (attempt {}/{}): {}",
@@ -357,6 +374,90 @@ impl Agent {
         }
         self.session.save()?;
         Ok(Some(delay))
+    }
+
+    /// Quarantine the current model and switch to another free one, if this
+    /// session is running on the Alphax Free pool and the failure justifies it.
+    ///
+    /// Returns `Some(0)` when a model switch happened, so the caller retries
+    /// immediately. Returns `None` when rotation does not apply, leaving the
+    /// caller on its original backoff path. `Some(delay)` with a non-zero delay
+    /// is never returned: there is no reason to wait once a fresh backend is
+    /// available.
+    ///
+    /// Failure to switch is deliberately not an error. A missing key, a
+    /// provider that rejects the model id, or an exhausted pool must all
+    /// degrade to the pre-existing retry behaviour rather than surface a new
+    /// error the user has never seen.
+    pub(crate) fn maybe_rotate_free_pool_model(&mut self, error: &str) -> Option<u64> {
+        self.try_free_pool_rotation(classify_rotation_trigger(error))
+    }
+
+    /// Rotate on an empty response, which is a distinct trigger from a
+    /// transport error: the model answered, it just had nothing to say.
+    ///
+    /// Called from the empty-post-tool path so a silently-broken free endpoint
+    /// is cycled out instead of consuming the whole continuation budget
+    /// re-asking a model that has already proven useless this turn.
+    pub(crate) fn maybe_rotate_free_pool_after_empty_response(&mut self) -> Option<u64> {
+        self.try_free_pool_rotation(super::free_pool_rotation::RotationTrigger::EmptyResponse)
+    }
+
+    fn try_free_pool_rotation(
+        &mut self,
+        trigger: super::free_pool_rotation::RotationTrigger,
+    ) -> Option<u64> {
+        let current = self.provider.model();
+        if !super::free_pool_rotation::should_rotate_for_model(&current) {
+            return None;
+        }
+
+        super::free_pool_rotation::quarantine_model(&current, trigger);
+        let next = super::free_pool_rotation::next_free_model(&current)?;
+        if next == current {
+            return None;
+        }
+
+        if let Err(err) = self.set_model_from_auth(&next) {
+            // A refused switch is not the user's problem to solve right now.
+            // Undo the quarantine so the original model can be retried on the
+            // normal backoff schedule instead of being written off.
+            super::free_pool_rotation::clear_quarantine(&current);
+            logging::warn(&format!(
+                "Free-pool rotation could not switch to '{next}': {err}; \
+                 falling back to retry backoff on '{current}'"
+            ));
+            return None;
+        }
+
+        let notice = super::free_pool_rotation::RotationNotice {
+            from_model: current,
+            to_model: next,
+            trigger,
+        };
+        logging::warn(&format!(
+            "Free-pool rotation: {} -> {} after {:?}",
+            notice.from_model, notice.to_model, notice.trigger
+        ));
+        // The rotation is reported through the normal status-detail channel in
+        // the streaming path; the terminal path prints directly. Either way the
+        // user sees "Alphax Free is rate limited; switching…" and never an
+        // upstream model id.
+        self.last_status_detail = Some(notice.status_line());
+        crate::terminal_println!("\n{}", notice.status_line());
+        Some(0)
+    }
+
+    /// Put a model back in service after it serves a turn successfully.
+    ///
+    /// Without this a quarantined model would stay skipped for the rest of the
+    /// session even after its rate limit reset, which silently shrinks the
+    /// pool the user has available to fall back on.
+    pub(crate) fn note_free_pool_model_healthy(&self) {
+        let model = self.provider.model();
+        if super::free_pool_rotation::should_rotate_for_model(&model) {
+            super::free_pool_rotation::clear_quarantine(&model);
+        }
     }
 
     fn continuation_prompt_for_stop_reason(stop_reason: &str) -> String {
@@ -569,6 +670,27 @@ pub(crate) fn extract_retry_after_secs(error: &str) -> Option<u64> {
         }
     }
     None
+}
+
+/// Classify a failure for free-pool quarantine purposes.
+///
+/// The distinction that matters is how long the upstream is likely to be
+/// unusable. A 429 is an explicit, usually-sustained limit and the gateway's
+/// own message can name a daily cap, so it earns the long quarantine. Everything
+/// else transient is an upstream blip that clears in seconds.
+pub(crate) fn classify_rotation_trigger(error: &str) -> super::free_pool_rotation::RotationTrigger {
+    let lower = error.to_ascii_lowercase();
+    let rate_limited = contains_429_with_rate_limit(&lower)
+        || lower.contains("too many requests")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("daily limit")
+        || lower.contains("quota");
+    if rate_limited {
+        super::free_pool_rotation::RotationTrigger::RateLimited
+    } else {
+        super::free_pool_rotation::RotationTrigger::Transient
+    }
 }
 
 /// Compute a retry delay for a transient provider error, preferring the

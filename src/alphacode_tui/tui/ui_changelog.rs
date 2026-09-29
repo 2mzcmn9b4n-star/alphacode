@@ -183,6 +183,7 @@ pub(super) fn get_unseen_changelog_entries() -> &'static Vec<String> {
             all_entries
                 .iter()
                 .take_while(|e| e.hash != last_seen_hash)
+                .take(20)
                 .map(|e| e.subject.to_string())
                 .collect()
         };

@@ -61,6 +61,7 @@ pub(crate) fn initial_title(args: &Args) -> String {
             "alphacode provider-test-coverage".to_string()
         }
         Some(Command::ProviderDoctor { .. }) => "alphacode provider-doctor".to_string(),
+        Some(Command::BugBounty { .. }) => "alphacode bugbounty".to_string(),
         Some(Command::AuthTest { .. }) => "alphacode auth-test".to_string(),
         Some(Command::Restart { .. }) => "alphacode restart".to_string(),
         Some(Command::Menubar { .. }) => "alphacode menubar".to_string(),

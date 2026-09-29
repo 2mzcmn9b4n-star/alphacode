@@ -167,9 +167,34 @@ impl FalsePositiveDefense {
         }
     }
 
-    /// A finding that was refuted by any negative hypothesis is not reportable.
+    /// A finding is still viable only if it was refuted by *nothing*.
+    ///
+    /// It also must have been actually tested. The previous version returned
+    /// `self.refuted_by.is_empty()`, which meant a freshly-constructed
+    /// `FalsePositiveDefense` — the state before any negative test has run —
+    /// read as maximally viable. The whole module is about a finding becoming
+    /// stronger by *surviving* attempts to disprove it, so an untested finding
+    /// has demonstrated nothing and must not pass as validated.
     pub fn is_still_viable(&self) -> bool {
-        self.refuted_by.is_empty()
+        self.refuted_by.is_empty() && !self.tested.is_empty()
+    }
+
+    /// Whether the defense was actually exercised.
+    ///
+    /// `survived` is the meaningful signal: those are the negative hypotheses
+    /// that were tried and did *not* kill the finding. A defense that only
+    /// recorded refutations has proven the opposite of what it claims.
+    pub fn was_exercised(&self) -> bool {
+        !self.survived.is_empty()
+    }
+
+    /// Whether any negative hypothesis actively killed the finding.
+    ///
+    /// Separate from [`Self::is_still_viable`] so callers can distinguish
+    /// "disproven" from "never tested" — conflating the two reports a finding
+    /// as refuted when nobody has actually looked at it yet.
+    pub fn is_refuted(&self) -> bool {
+        !self.refuted_by.is_empty()
     }
 
     pub fn defense_score(&self) -> f32 {

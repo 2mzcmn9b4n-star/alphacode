@@ -260,19 +260,30 @@ pub(super) fn truncate_with_ellipsis(input: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
-    let chars: Vec<char> = input.chars().collect();
-    if chars.len() <= width {
+    let display_width = unicode_width::UnicodeWidthStr::width(input);
+    if display_width <= width {
         return input.to_string();
     }
     if width <= 3 {
         return ".".repeat(width);
     }
-    let mut out: String = chars.into_iter().take(width - 3).collect();
+    let mut out = String::new();
+    let mut current_width = 0;
+    for ch in input.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width + ch_width > width - 3 {
+            break;
+        }
+        out.push(ch);
+        current_width += ch_width;
+    }
     out.push_str("...");
     out
 }
 
 pub(super) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let percent_x = percent_x.min(100);
+    let percent_y = percent_y.min(100);
     let popup = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

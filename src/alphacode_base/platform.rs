@@ -300,6 +300,28 @@ pub fn signal_detached_process_group(pid: u32, signal: i32) -> std::io::Result<(
     }
     #[cfg(windows)]
     {
+        // Both of these are foot-guns for a function that ends in
+        // `taskkill /T /F`, which force-kills a whole process tree.
+        //
+        // * `pid == 0` is the System Idle Process, not a task we ever spawn.
+        // * `pid == our own pid` is never a legitimate target: every caller
+        //   aims at a *different* process (a detached task's pid, or the
+        //   server pid from `server stop`, which runs in the client).
+        //
+        // Rejecting both turns a would-be self-destruct into an ordinary
+        // `Err` the caller already knows how to report.
+        if pid == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to signal process id 0 (system idle process)",
+            ));
+        }
+        if pid == std::process::id() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to signal this process",
+            ));
+        }
         let _ = signal;
         use std::os::windows::process::CommandExt;
         use windows_sys::Win32::Foundation::CloseHandle;

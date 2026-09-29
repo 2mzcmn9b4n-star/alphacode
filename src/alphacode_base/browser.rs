@@ -8,7 +8,7 @@ const GITHUB_API_LATEST: &str =
 
 // Centralized browser-bridge identity (see ChatGPT review + XPI verification).
 //
-// The bundled `AlphaCode-Browser-Agent-1.6.0.xpi` ("AlphaCode Browser Agent")
+// The bundled `AlphaCode-Browser-Agent-1.6.1.xpi` ("AlphaCode Browser Agent")
 // declares:
 //   gecko.id = "alpha-agent@alpha-agent.local"
 //   background.js NATIVE_HOSTS = ["alpha_agent", "firefox_agent_bridge"]
@@ -116,28 +116,31 @@ fn host_binary_path() -> PathBuf {
     }
 }
 
-pub const EMBEDDED_XPI_FILENAME: &str = "AlphaCode-Browser-Agent-1.6.0.xpi";
+pub const EMBEDDED_XPI_FILENAME: &str = "AlphaCode-Browser-Agent-1.6.1.xpi";
 
 /// Path used for the extension bundled with this binary.
 ///
-/// Keep the version in the filename: Firefox can keep an XPI mapped for the
-/// lifetime of the process on Windows, so overwriting the historical
+/// Keep the version in the filename, and keep it equal to the `version` in the
+/// XPI's own `manifest.json`. Firefox can keep an XPI mapped for the lifetime
+/// of the process on Windows, so overwriting the historical
 /// `browser-agent-bridge.xpi` can fail with ERROR_USER_MAPPED_FILE. A new
 /// versioned path makes setup refreshable without requiring Firefox to be
-/// closed first.
+/// closed first — but only if the filename actually moves with the content.
+/// Bumping the manifest while leaving the filename behind silently defeats the
+/// mechanism: the new bytes are written over the still-mapped old path.
 pub fn xpi_path() -> PathBuf {
     browser_dir().join(EMBEDDED_XPI_FILENAME)
 }
 
 /// The Firefox extension, compiled into the binary from the repository-root
-/// `AlphaCode-Browser-Agent-1.6.0.xpi`. Every rebuild picks up the current file,
+/// `AlphaCode-Browser-Agent-1.6.1.xpi`. Every rebuild picks up the current file,
 /// so `browser setup` never needs to download the extension and works offline.
 /// (The native CLI + host binaries are separate programs from an external
 /// release and cannot be embedded — only the XPI lives in this repo.)
 ///
 /// `build.rs` emits `cargo:rerun-if-changed` for the XPI so any update to
 /// the file forces a rebuild and refreshes these bytes.
-const EMBEDDED_XPI: &[u8] = include_bytes!("../../AlphaCode-Browser-Agent-1.6.0.xpi");
+const EMBEDDED_XPI: &[u8] = include_bytes!("../../AlphaCode-Browser-Agent-1.6.1.xpi");
 
 /// Raw bytes of the embedded Firefox extension. Exposed so diagnostics,
 /// tests, and the release guard can verify the bridge was compiled in.
@@ -333,7 +336,7 @@ pub async fn ensure_browser_setup() -> Result<String> {
     std::fs::create_dir_all(browser_dir())?;
 
     // Step 0 (offline-first): install the XPI compiled into this binary via
-    // `include_bytes!("../../AlphaCode-Browser-Agent-1.6.0.xpi")`. This guarantees the
+    // `include_bytes!("../../AlphaCode-Browser-Agent-1.6.1.xpi")`. This guarantees the
     // extension is available even with no network, and refreshes the installed
     // copy whenever a rebuild bundles a new XPI. It also keeps
     // `EMBEDDED_XPI` / `install_embedded_xpi` referenced so `cargo check`
@@ -706,8 +709,45 @@ async fn download_browser_binary() -> Result<()> {
     Ok(())
 }
 
+/// `fs::rename` with a bounded retry on Windows transient sharing failures.
+///
+/// `ERROR_ACCESS_DENIED` (5), `ERROR_SHARING_VIOLATION` (32) and
+/// `ERROR_USER_MAPPED_FILE` (33) all mean "some other process still has the
+/// destination open". Firefox keeps a mapped XPI open for the lifetime of its
+/// own process, so this is a *normal* condition for the extension refresh
+/// rather than an exceptional one — see the `EMBEDDED_XPI_FILENAME` doc
+/// comment, which exists precisely because overwriting a mapped file fails.
+/// Retry briefly so a refresh does not require restarting Firefox. Anywhere
+/// else a single atomic attempt is correct.
+fn rename_with_retry(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        const ATTEMPTS: u32 = 10;
+        const BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
+        let mut last = None;
+        for attempt in 0..ATTEMPTS {
+            match std::fs::rename(from, to) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    let transient = matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33));
+                    last = Some(error);
+                    if !transient || attempt + 1 == ATTEMPTS {
+                        break;
+                    }
+                    std::thread::sleep(BACKOFF);
+                }
+            }
+        }
+        Err(last.expect("the loop always runs at least one attempt"))
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(from, to)
+    }
+}
+
 #[allow(unused_variables)]
-fn write_file_atomically(path: &PathBuf, bytes: &[u8], executable: bool) -> Result<()> {
+fn write_file_atomically(path: &std::path::Path, bytes: &[u8], executable: bool) -> Result<()> {
     let parent = path
         .parent()
         .context("Target file has no parent directory")?;
@@ -724,16 +764,30 @@ fn write_file_atomically(path: &PathBuf, bytes: &[u8], executable: bool) -> Resu
         ts
     ));
 
-    std::fs::write(&tmp_path, bytes)?;
+    // Every failure path from here on must remove the scratch file. The old
+    // `?` chain leaked a `.<name>.tmp-<pid>-<nanos>` into the browser dir on
+    // every failure, and `browser setup` runs repeatedly, so those accumulate.
+    if let Err(error) = std::fs::write(&tmp_path, bytes) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error).context("Failed to write temporary file");
+    }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = if executable { 0o755 } else { 0o644 };
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(mode))?;
+        if let Err(error) =
+            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(mode))
+        {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(error).context("Failed to set permissions on temporary file");
+        }
     }
 
-    std::fs::rename(&tmp_path, path)?;
+    if let Err(error) = rename_with_retry(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error).with_context(|| format!("Failed to move {} into place", path.display()));
+    }
     Ok(())
 }
 

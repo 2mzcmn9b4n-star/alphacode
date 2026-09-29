@@ -158,10 +158,14 @@ fn sanitize_discriminator(raw: &str) -> String {
 }
 
 fn ensure_private_runtime_dir(path: &Path) {
-    let _ = std::fs::create_dir_all(path);
+    if let Err(e) = std::fs::create_dir_all(path) {
+        tracing::warn!("Failed to create runtime dir {}: {}", path.display(), e);
+    }
     #[cfg(unix)]
     {
-        let _ = crate::alphacode_core::fs::set_directory_permissions_owner_only(path);
+        if let Err(e) = crate::alphacode_core::fs::set_directory_permissions_owner_only(path) {
+            tracing::warn!("Failed to set permissions on {}: {}", path.display(), e);
+        }
     }
 }
 

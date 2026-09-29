@@ -823,4 +823,19 @@ pub(super) fn draw_onboarding_welcome(frame: &mut Frame, app: &dyn TuiState, are
         Paragraph::new(telemetry_footer_line()).alignment(Alignment::Center),
         chunks[idx],
     );
+
+    // Subtle bottom border for visual closure
+    if area.height > 0 && area.width > 2 {
+        let border_line = crate::alphacode_tui::tui::brand_ux::BrandTheme::breathing_separator(
+            area.width as usize,
+            app.animation_elapsed(),
+        );
+        let border_area = Rect {
+            x: area.x,
+            y: area.bottom().saturating_sub(1),
+            width: area.width,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(border_line), border_area);
+    }
 }

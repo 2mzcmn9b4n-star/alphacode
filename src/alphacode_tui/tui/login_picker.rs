@@ -217,9 +217,12 @@ impl LoginPicker {
         if self.filtered.is_empty() {
             return None;
         }
+        if row >= list_height {
+            return None;
+        }
         let available_items = (list_height as usize).max(1);
         let start = self.visible_window_start(available_items);
-        let visible_idx = start + row as usize;
+        let visible_idx = start.saturating_add(row as usize);
         (visible_idx < (start + available_items).min(self.filtered.len())).then_some(visible_idx)
     }
 

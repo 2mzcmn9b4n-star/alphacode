@@ -81,6 +81,12 @@ impl Agent {
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
         self.set_log_context();
+        // Reset the per-turn budget counters. `BudgetEnforcer` is a per-`Agent`
+        // field that outlives a single turn, so without this `phase_calls`
+        // accumulated across the whole session and a long conversation would
+        // eventually trip the phase budget and be forced into `Report`.
+        self.budget_enforcer
+            .begin_turn(self.goal_contract.as_ref().map(|c| c.phase));
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.
         let _streaming_guard = crate::session::StreamingGuard::new(self.session.id.clone());
@@ -329,6 +335,22 @@ impl Agent {
                                                 ),
                                             });
                                             tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
+                                        }
+                                        // A zero delay means free-pool rotation
+                                        // already switched models. Resync the
+                                        // header, picker, and context budget so
+                                        // no client keeps showing the model that
+                                        // just failed.
+                                        if delay == 0
+                                            && let Some(detail) = self.last_status_detail.clone()
+                                        {
+                                            let _ = event_tx.send(ServerEvent::StatusDetail { detail });
+                                            let _ = event_tx.send(ServerEvent::ModelChanged {
+                                                id: 0,
+                                                model: self.provider.model(),
+                                                provider_name: Some(self.provider.display_name()),
+                                                error: None,
+                                            });
                                         }
                                         continue;
                                     }
@@ -1133,6 +1155,10 @@ impl Agent {
                     error: None,
                 });
             }
+
+            // The model that just served the turn is working, so return it to
+            // service if a previous failure had quarantined it.
+            self.note_free_pool_model_healthy();
 
             let had_tool_calls_before = !tool_calls.is_empty();
             self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);

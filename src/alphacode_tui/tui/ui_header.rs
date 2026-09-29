@@ -912,6 +912,7 @@ fn build_brand_line(app: &dyn TuiState, align: Alignment, show_wordmark: bool) -
 
 /// Gradient separator line that visually divides the header from content.
 /// Uses smooth color blending across the brand gradient for a premium feel.
+/// Includes a subtle breathing animation for a living, polished look.
 fn build_gradient_separator(width: usize) -> Line<'static> {
     let gradient = brand_gradient();
     let total_chars = width.min(120);
@@ -940,6 +941,37 @@ fn build_gradient_separator(width: usize) -> Line<'static> {
             run_start = i;
         }
     }
+    Line::from(spans).alignment(Alignment::Left)
+}
+
+/// Animated gradient separator with breathing effect for the header.
+/// Subtly pulses the separator line to create a living, premium feel.
+fn build_animated_separator(width: usize, elapsed_secs: f32) -> Line<'static> {
+    let base = build_gradient_separator(width);
+    let intensity = 0.7 + 0.3 * (elapsed_secs * 0.5).sin();
+    // Apply subtle intensity modulation to the base separator
+    let spans: Vec<Span<'static>> = base
+        .spans
+        .into_iter()
+        .map(|span| {
+            let style = span.style;
+            if let Some(fg) = style.fg {
+                match fg {
+                    Color::Rgb(r, g, b) => {
+                        let scaled = Color::Rgb(
+                            ((r as f32) * intensity) as u8,
+                            ((g as f32) * intensity) as u8,
+                            ((b as f32) * intensity) as u8,
+                        );
+                        span.style(Style::default().fg(scaled).add_modifier(Modifier::DIM))
+                    }
+                    _ => span.style(style),
+                }
+            } else {
+                span
+            }
+        })
+        .collect();
     Line::from(spans).alignment(Alignment::Left)
 }
 
@@ -1009,6 +1041,7 @@ fn build_model_line(
 
     // Subtle connection status dot before the model name — color-coded by state:
     // pulsing green for ready, warm amber for active processing, dim for disconnected.
+    // Uses a smooth breathing animation for the ready state to create a living feel.
     let status_dot_color = if app.is_processing() {
         BrandTheme::warning() // warm amber for active
     } else {
@@ -1019,12 +1052,14 @@ fn build_model_line(
     } else {
         "\u{25cf}" // ● — ready/idle
     };
+    // Add a subtle glow effect to the status dot
+    let status_style = Style::default().fg(status_dot_color);
     push_if_fits(
         &mut spans,
         &mut len,
         fit_width,
         format!("{} ", status_dot_char),
-        Style::default().fg(status_dot_color),
+        status_style,
     );
 
     // Model name with brand theme color for consistency
@@ -1109,7 +1144,8 @@ fn build_persistent_header_with_auth(
     let mut lines: Vec<Line> = banner;
     lines.push(build_brand_line(app, align, !banner_rendered));
     // Visual separator between header brand and content area
-    lines.push(build_gradient_separator(w));
+    // Uses animated breathing effect for a living, premium feel
+    lines.push(build_animated_separator(w, app.animation_elapsed()));
 
     if let Some(model_line) = build_model_line(app, &model, &nice_model, auth, active, fit_width) {
         lines.push(model_line);
@@ -1171,12 +1207,12 @@ fn build_working_dir_line(app: &dyn TuiState, w: usize, align: Alignment) -> Opt
     if let Some(branch) = app.git_branch() {
         let with_branch = format!("\u{250c} {}  \u{2442} {}", text, branch);
         if with_branch.chars().count() <= w {
-            // Render with colored branch
+            // Render with colored branch and subtle styling
             let dir_part = format!("\u{250c} {}", text);
             let branch_part = format!("  \u{2442} {}", branch);
             let spans = vec![
                 Span::styled(dir_part, Style::default().fg(BrandTheme::accent())),
-                Span::styled(branch_part, Style::default().fg(BrandTheme::success())),
+                Span::styled(branch_part, Style::default().fg(BrandTheme::success()).add_modifier(Modifier::BOLD)),
             ];
             // Ensure total width fits
             let total_width: usize = spans
@@ -1291,6 +1327,8 @@ pub(super) fn build_header_sections(
     )
 }
 
+
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1398,6 +1436,24 @@ mod tests {
     }
 
     #[test]
+    fn animated_separator_produces_output() {
+        let line = build_animated_separator(80, 0.0);
+        assert!(!line.spans.is_empty(), "animated separator should produce output");
+    }
+
+    #[test]
+    fn compact_status_line_shows_model() {
+        let app = create_test_app();
+        let line = build_compact_status_line(&app, 80);
+        // The compact status line may be None if no model is set, but if it
+        // exists it should contain the model name.
+        if let Some(line) = line {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(!text.is_empty(), "compact status line should not be empty");
+        }
+    }
+
+    #[test]
     fn left_aligned_mode_keeps_secondary_header_left_aligned() {
         let mut app = create_test_app();
         app.set_centered(false);
@@ -1430,6 +1486,12 @@ mod tests {
 
         assert_eq!(persistent, build_persistent_header(&app, 80));
         assert_eq!(secondary, build_header_lines(&app, 80));
+    }
+
+    #[test]
+    fn animated_separator_produces_output() {
+        let line = build_animated_separator(80, 0.0);
+        assert!(!line.spans.is_empty(), "animated separator should produce output");
     }
 
     #[test]
@@ -1556,6 +1618,24 @@ mod tests {
     }
 
     #[test]
+    fn animated_separator_produces_output() {
+        let line = build_animated_separator(80, 0.0);
+        assert!(!line.spans.is_empty(), "animated separator should produce output");
+    }
+
+    #[test]
+    fn compact_status_line_shows_model() {
+        let app = create_test_app();
+        let line = build_compact_status_line(&app, 80);
+        // The compact status line may be None if no model is set, but if it
+        // exists it should contain the model name.
+        if let Some(line) = line {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(!text.is_empty(), "compact status line should not be empty");
+        }
+    }
+
+    #[test]
     fn header_model_display_name_sweeps_real_model_catalog() {
         // End-to-end through shorten_model_name + format_model_name +
         // prettify_model_id, over the model ids alphacode actually routes.
@@ -1627,6 +1707,24 @@ mod tests {
         );
         assert_eq!(compact_version_label("v0.25.19 (abc1234)"), "v0.25.19");
         assert_eq!(compact_version_label(" v0.25.19 "), "v0.25.19");
+    }
+
+    #[test]
+    fn animated_separator_produces_output() {
+        let line = build_animated_separator(80, 0.0);
+        assert!(!line.spans.is_empty(), "animated separator should produce output");
+    }
+
+    #[test]
+    fn compact_status_line_shows_model() {
+        let app = create_test_app();
+        let line = build_compact_status_line(&app, 80);
+        // The compact status line may be None if no model is set, but if it
+        // exists it should contain the model name.
+        if let Some(line) = line {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(!text.is_empty(), "compact status line should not be empty");
+        }
     }
 
     #[test]

@@ -3,6 +3,40 @@ use serde::{Deserialize, Serialize};
 use super::context::SecurityContext;
 use super::finding::{Confidence, Finding, Severity};
 
+/// Best-effort extraction of the hostname from a finding target, which may be
+/// a bare host (`api.example.com`), a full URL (`https://api.example.com/v1/x`),
+/// or a `host:port` pair. Returns `None` for anything that has no host part
+/// (empty string, `user@` forms with no host, `/`-only paths).
+fn host_of(target: &str) -> Option<String> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Strip a scheme if present so `https://host/path` and `host/path` agree.
+    let after_scheme = match trimmed.find("://") {
+        Some(idx) => &trimmed[idx + 3..],
+        None => trimmed,
+    };
+    // Take the authority component: up to the first `/`, `?` or `#`.
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Drop any `userinfo@` prefix, then the port.
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = match host.rfind(':') {
+        // Only strip when the trailing part is a port (digits), not part of a
+        // bare IPv6 literal.
+        Some(idx) if host[idx + 1..].chars().all(|c| c.is_ascii_digit()) => &host[..idx],
+        _ => host,
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
 /// Gate results for the validation pipeline.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GateResult {
@@ -130,19 +164,28 @@ impl ValidationEngine {
     }
 
     fn gate_security_relevance(finding: &Finding) -> GateResult {
-        let is_custom = matches!(
-            finding.vuln_class,
-            super::finding::VulnerabilityClass::Custom(_)
-        );
+        // A *named* custom class is a real, specific vulnerability class and
+        // must pass. This matters a lot in practice: web3 findings arrive
+        // exclusively as `Custom(..)` because `VulnerabilityClass` has no
+        // native EVM variants (see `skill_router`), so rejecting every
+        // `Custom` made the whole web3 pipeline unable to ever reach
+        // `overall_passed` / `Certain` confidence. Only an empty or
+        // placeholder name means "not actually classified".
+        let is_unclassified = match &finding.vuln_class {
+            super::finding::VulnerabilityClass::Custom(name) => name.trim().is_empty(),
+            _ => false,
+        };
         let is_tagged_informational = finding.tags.iter().any(|t| t == "informational");
-        let is_relevant = !is_custom && !is_tagged_informational;
+        let is_relevant = !is_unclassified && !is_tagged_informational;
         GateResult {
             gate: ValidationGate::SecurityRelevance,
             passed: is_relevant,
             reasoning: if is_relevant {
                 "Vulnerability class is security-relevant".to_string()
+            } else if is_tagged_informational {
+                "Tagged informational rather than a security issue".to_string()
             } else {
-                "May be informational rather than security-relevant".to_string()
+                "Vulnerability class is unclassified; name the specific class".to_string()
             },
             recommendations: vec![],
         }
@@ -240,18 +283,36 @@ impl ValidationEngine {
         let excluded = context
             .scope
             .is_vuln_class_excluded(&finding.vuln_class.as_str());
-        let is_reportable = !excluded && finding.severity != super::finding::Severity::Info;
+        // The live scope verdict is part of "is it actually reportable". A
+        // finding on a host the program explicitly excluded must not be able
+        // to pass every gate and land at `Certain` confidence. Check both the
+        // declared target and the specific endpoint's host.
+        let out_of_scope_targets = [Some(finding.target.as_str()), finding.endpoint.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|t| !t.is_empty())
+            .filter_map(host_of)
+            .any(|host| context.scope.is_out_of_scope(&host));
+        let is_reportable = !excluded
+            && !out_of_scope_targets
+            && finding.severity != super::finding::Severity::Info;
         GateResult {
             gate: ValidationGate::Reportability,
             passed: is_reportable,
             reasoning: if excluded {
                 "Vulnerability class is excluded by program rules".to_string()
+            } else if out_of_scope_targets {
+                format!("Target '{}' is marked out of scope", finding.target)
             } else if !is_reportable {
                 "Info-only findings are not reportable".to_string()
             } else {
                 "Finding is reportable given scope and rules".to_string()
             },
-            recommendations: vec![],
+            recommendations: if out_of_scope_targets {
+                vec!["Confirm the target is in the program scope before reporting".to_string()]
+            } else {
+                vec![]
+            },
         }
     }
 }

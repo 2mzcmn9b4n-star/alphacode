@@ -214,10 +214,7 @@ pub fn session_is_pi(
     let model_matches = model
         .map(|model| {
             let model = model.to_ascii_lowercase();
-            model == "pi"
-                || model.starts_with("pi-")
-                || model.starts_with("pi/")
-                || model.contains("/pi-")
+            model == "pi" || model.starts_with("pi-") || model.starts_with("pi/")
         })
         .unwrap_or(false);
     provider_matches || model_matches

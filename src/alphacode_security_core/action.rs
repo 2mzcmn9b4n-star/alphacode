@@ -256,6 +256,13 @@ impl ActionSpace {
     }
 
     /// Rank by counterfactual value. Deterministic.
+    ///
+    /// The tie-break on `id` is what makes the "Deterministic" claim true:
+    /// `affordable` iterates a `HashMap`, whose order is randomized per
+    /// process, and `sort_by` is stable — so two actions with identical scores
+    /// (which is the *normal* case, since every builtin starts from the same
+    /// heuristics) kept their random input order and `select_best` returned a
+    /// different action on every run.
     pub fn ranked<'a>(&self, candidates: Vec<&'a Action>) -> Vec<(&'a Action, f32)> {
         let mut scored: Vec<(&Action, f32)> = candidates
             .into_iter()
@@ -264,7 +271,7 @@ impl ActionSpace {
                 (a, a.action_value(bonus))
             })
             .collect();
-        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.id.cmp(&b.0.id)));
         scored
     }
 

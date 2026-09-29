@@ -2200,7 +2200,16 @@ impl OpenRouterProvider {
         // only exists on their gateway. Fetching /v1/models returns unrelated paid
         // models that break the static catalog. Disable live model catalog for
         // profiles whose static model list contains virtual/gateway-only IDs.
-        let disable_model_catalog = profile.id == "alphax-free";
+        //
+        // The free pool is still refreshed in the background, but through a
+        // separate path that keeps only zero-priced rows, so the rotating pool
+        // stays current without the paid models ever entering the model list.
+        let is_alphax_free =
+            profile.id == crate::alphacode_provider_metadata::ALPHAX_FREE_PROFILE_ID;
+        if is_alphax_free {
+            Self::schedule_free_pool_refresh(resolved.api_base.clone());
+        }
+        let disable_model_catalog = is_alphax_free;
 
         Ok(Self {
             client: crate::alphacode_provider_core::shared_http_client(),
@@ -2228,6 +2237,41 @@ impl OpenRouterProvider {
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
         })
+    }
+
+    /// Refresh the Alphax Free rotation pool in the background.
+    ///
+    /// Entirely fire-and-forget: the curated pool is already correct, so a
+    /// failed refresh costs nothing and must never surface to the user or
+    /// delay startup. A TTL guard keeps this to one request per hour even
+    /// though provider construction happens on every session start.
+    fn schedule_free_pool_refresh(api_base: String) {
+        static LAST_REFRESH: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> =
+            std::sync::OnceLock::new();
+        let slot = LAST_REFRESH.get_or_init(|| std::sync::Mutex::new(None));
+        {
+            let Ok(mut last) = slot.lock() else {
+                return;
+            };
+            if let Some(previous) = *last
+                && previous.elapsed()
+                    < crate::alphacode_provider_metadata::free_pool::POOL_REFRESH_TTL
+            {
+                return;
+            }
+            // Claim the slot before spawning so concurrent session starts
+            // cannot each kick off their own fetch.
+            *last = Some(std::time::Instant::now());
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            crate::alphacode_provider_metadata::free_pool::refresh_free_pool_from_gateway(
+                &api_base,
+            )
+            .await;
+        });
     }
 
     fn should_background_refresh_model_catalog(&self, cache_age_secs: u64) -> bool {

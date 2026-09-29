@@ -151,7 +151,9 @@ async fn prune_expired_terminal_swarm_members(
     for session_id in candidates {
         // A session can be resumed between candidate collection and removal.
         // Never collect a member that currently has a live agent runtime.
-        if live_sessions.contains(&session_id) || sessions.read().await.contains_key(&session_id) {
+        // Lock ordering: sessions -> swarm_state.members (consistent with reap_idle_spawned_workers)
+        let session_exists = sessions.read().await.contains_key(&session_id);
+        if live_sessions.contains(&session_id) || session_exists {
             continue;
         }
         let removed_swarm_id = {
@@ -665,13 +667,13 @@ pub struct Server {
     client_debug_state: Arc<RwLock<ClientDebugState>>,
     /// Channel to receive client debug responses from TUI (request_id, response)
     client_debug_response_tx: broadcast::Sender<(u64, String)>,
-    /// Background debug jobs (async debug commands)
+    /// Background debug jobs (async debug commands) - bounded with TTL cleanup
     debug_jobs: Arc<RwLock<HashMap<String, DebugJob>>>,
-    /// Channel subscriptions (swarm_id -> channel -> session_ids)
+    /// Channel subscriptions (swarm_id -> channel -> session_ids) - bounded
     channel_subscriptions: ChannelSubscriptions,
-    /// Reverse index for channel subscriptions: session_id -> swarm_id -> channels
+    /// Reverse index for channel subscriptions: session_id -> swarm_id -> channels - bounded
     channel_subscriptions_by_session: ChannelSubscriptions,
-    /// Event history for real-time event subscription (ring buffer)
+    /// Event history for real-time event subscription (ring buffer, max 1000 events)
     event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     /// Counter for event IDs
     event_counter: Arc<std::sync::atomic::AtomicU64>,
@@ -775,6 +777,7 @@ impl Server {
             mcp_pool: Arc::new(OnceCell::new()),
             shutdown_signals: Arc::new(RwLock::new(HashMap::new())),
             soft_interrupt_queues: Arc::new(RwLock::new(HashMap::new())),
+
             await_members_runtime: AwaitMembersRuntime::default(),
             swarm_mutation_runtime: SwarmMutationRuntime::default(),
         }

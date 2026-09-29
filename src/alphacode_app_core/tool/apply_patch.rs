@@ -44,17 +44,11 @@ fn extract_patch_text(input: &Value) -> Result<(String, Option<String>), anyhow:
                 return Ok((value.to_string(), intent));
             }
         }
-        let mut keys: Vec<&String> = obj.keys().collect();
-        keys.sort();
-        let keys = keys
-            .iter()
-            .map(|k| format!("`{k}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
         anyhow::bail!(
-            "missing field `patch_text`. Received keys: {keys}. \
+            "missing field `patch_text`. {}. \
              Send the patch as a string under `patch_text`, e.g. \
-             {{\"patch_text\": \"*** Begin Patch\\n*** Update File: a.txt\\n@@\\n- old\\n+ new\\n*** End Patch\"}}"
+             {{\"patch_text\": \"*** Begin Patch\\n*** Update File: a.txt\\n@@\\n- old\\n+ new\\n*** End Patch\"}}",
+            super::describe_received_arguments(input)
         );
     }
     anyhow::bail!(

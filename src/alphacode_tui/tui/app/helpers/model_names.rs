@@ -36,6 +36,13 @@ pub(crate) fn pretty_model_display_name(model: &str) -> String {
     if let Some(name) = crate::alphacode_provider_metadata::internal_model_display_name(model) {
         return name.to_string();
     }
+    // Every model in the Alphax Free rotation pool is a gateway routing detail.
+    // The user chose "Alphax Free", so which free model actually served a turn
+    // is ours to manage, not something to show them. Checked after the virtual
+    // id above so the alias itself keeps resolving through that table.
+    if let Some(name) = crate::alphacode_provider_metadata::free_model_display_name(model) {
+        return name.to_string();
+    }
 
     // Preserve bracketed route suffixes (`[1m]`, `[web]`) and re-attach them as
     // a parenthetical, since they are alphacode-side route markers rather than part
@@ -279,6 +286,14 @@ pub(crate) fn pretty_known_model_family(model: &str) -> Option<String> {
     // filters on the raw entry.name (see PickerAction::Model filter_text), so
     // hiding the id here does not break copy-free search.
     if let Some(name) = crate::alphacode_provider_metadata::internal_model_display_name(model) {
+        return Some(name.to_string());
+    }
+    // Free-pool members resolve to the product name in list surfaces too, so
+    // the picker never shows an upstream slug like
+    // `nvidia/nemotron-3-ultra-550b-a55b:free` to someone who picked "Alphax
+    // Free". This has to run before the `contains('/') || contains(':')` bail
+    // below, which would otherwise return `None` and leak the raw id.
+    if let Some(name) = crate::alphacode_provider_metadata::free_model_display_name(model) {
         return Some(name.to_string());
     }
     let (core, _) = split_bracket_suffix(model);
@@ -588,6 +603,58 @@ mod tests {
             pretty_known_model_family("kilo-auto/free").as_deref(),
             Some("Alphax Free")
         );
+    }
+
+    #[test]
+    fn pretty_names_hide_every_free_pool_model() {
+        // Rotation switches the underlying model silently. Whichever one it
+        // lands on, the user picked "Alphax Free" and must keep seeing exactly
+        // that — never a gateway routing id in the header or the picker.
+        for model in crate::alphacode_provider_metadata::CURATED_FREE_MODELS {
+            assert_eq!(
+                pretty_model_display_name(model),
+                "Alphax Free",
+                "prose surface leaked free-pool model `{model}`"
+            );
+            assert_eq!(
+                pretty_known_model_family(model).as_deref(),
+                Some("Alphax Free"),
+                "list surface leaked free-pool model `{model}`"
+            );
+        }
+        // Including a model the curated list does not name, which is the shape
+        // of anything the background refresh discovers later.
+        assert_eq!(
+            pretty_known_model_family("some-vendor/brand-new:free").as_deref(),
+            Some("Alphax Free")
+        );
+    }
+
+    #[test]
+    fn pretty_names_still_show_real_paid_models() {
+        // The pool mapping must not swallow names users legitimately need.
+        // These ids are namespaced, so the existing formatter title-cases the
+        // segments; the point of the assertion is that the raw id is still
+        // recognizable and was NOT replaced with the "Alphax Free" product name.
+        for raw in ["openai/gpt-5.4", "claude-opus-5", "kilo-auto/small"] {
+            let pretty = pretty_model_display_name(raw);
+            assert_ne!(
+                pretty, "Alphax Free",
+                "paid model `{raw}` was mislabelled as the free product"
+            );
+            // The family word from the id must survive, so the row stays
+            // recognizable as what the user actually selected.
+            let family = raw.split(['/', '-']).next().unwrap_or(raw);
+            assert!(
+                pretty
+                    .to_ascii_lowercase()
+                    .contains(&family.to_ascii_lowercase()),
+                "paid model `{raw}` lost its `{family}` identity, got: {pretty}"
+            );
+        }
+        // Unnamespaced ids keep their exact existing rendering.
+        assert_eq!(pretty_model_display_name("gpt-5.4"), "GPT-5.4");
+        assert_eq!(pretty_model_display_name("claude-opus-5"), "Claude Opus 5");
     }
 
     #[test]

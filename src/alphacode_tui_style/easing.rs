@@ -149,7 +149,7 @@ pub fn ease_in_out_sine(t: f32) -> f32 {
 #[inline]
 pub fn ease_in_expo(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    if t == 0.0 {
+    if t.abs() < f32::EPSILON {
         0.0
     } else {
         2.0_f32.powf(10.0 * (t - 1.0))
@@ -160,7 +160,7 @@ pub fn ease_in_expo(t: f32) -> f32 {
 #[inline]
 pub fn ease_out_expo(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    if t == 1.0 {
+    if (t - 1.0).abs() < f32::EPSILON {
         1.0
     } else {
         1.0 - 2.0_f32.powf(-10.0 * t)
@@ -171,10 +171,10 @@ pub fn ease_out_expo(t: f32) -> f32 {
 #[inline]
 pub fn ease_in_out_expo(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    if t == 0.0 {
+    if t.abs() < f32::EPSILON {
         return 0.0;
     }
-    if t == 1.0 {
+    if (t - 1.0).abs() < f32::EPSILON {
         return 1.0;
     }
     if t < 0.5 {
@@ -250,10 +250,10 @@ pub fn ease_in_out_back(t: f32) -> f32 {
 #[inline]
 pub fn ease_in_elastic(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    if t == 0.0 {
+    if t.abs() < f32::EPSILON {
         return 0.0;
     }
-    if t == 1.0 {
+    if (t - 1.0).abs() < f32::EPSILON {
         return 1.0;
     }
     let p = 0.3;
@@ -266,10 +266,10 @@ pub fn ease_in_elastic(t: f32) -> f32 {
 #[inline]
 pub fn ease_out_elastic(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    if t == 0.0 {
+    if t.abs() < f32::EPSILON {
         return 0.0;
     }
-    if t == 1.0 {
+    if (t - 1.0).abs() < f32::EPSILON {
         return 1.0;
     }
     let p = 0.3;

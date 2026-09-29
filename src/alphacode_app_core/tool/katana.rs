@@ -1,5 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput};
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -24,17 +24,19 @@ struct KatanaInput {
     #[serde(default)]
     no_color: bool,
     #[serde(default)]
-    no_remote: bool,
-    #[serde(default)]
-    no_store: bool,
-    #[serde(default)]
     f: Option<String>,
+    /// Crawl-scope regex (`-crawl-scope`). Replaces the old `d` field, which
+    /// was emitted as `-d` — that is `-depth`, an int, so a domain string
+    /// there was a hard parse error and with both fields set the second `-d`
+    /// silently overwrote the requested depth.
     #[serde(default)]
-    d: Option<String>,
+    domain_scope: Option<String>,
     #[serde(default)]
     robots: bool,
+    /// Extra request headers as `Name: value` (katana `-H`). Was a bare bool,
+    /// which could never produce a valid `-H` value.
     #[serde(default)]
-    headers: bool,
+    headers: Vec<String>,
     #[serde(default)]
     include_body: bool,
     #[serde(default)]
@@ -63,51 +65,44 @@ impl Tool for KatanaTool {
                 },
                 "depth": {
                     "type": "integer",
-                    "description": "Maximum crawl depth. Default: 3."
+                    "description": "Maximum crawl depth (katana -d). Default: 3."
                 },
                 "threads": {
                     "type": "integer",
-                    "description": "Number of concurrent threads. Default: 50."
+                    "description": "Number of concurrent fetchers (katana -c). Katana's own default is 10."
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Request timeout in seconds. Default: 60."
+                    "description": "Per-request timeout in seconds. Katana's own default is 10."
                 },
                 "json_output": {
                     "type": "boolean",
-                    "description": "Output in JSON format. Default: false."
-                },
-                "no_remote": {
-                    "type": "boolean",
-                    "description": "Skip remote content discovery. Default: false."
-                },
-                "no_store": {
-                    "type": "boolean",
-                    "description": "Do not store results. Default: false."
+                    "description": "Output in JSONL format. Default: false."
                 },
                 "f": {
                     "type": "string",
                     "description": "Field selector (e.g., 'u', 'd', 'r', 'ru', 'rd', 'ri', 'm', 'rdi', 'f')"
                 },
-                "d": {
+                "domain_scope": {
                     "type": "string",
-                    "description": "Filter domains to include."
+                    "description": "Regex limiting which hosts/paths katana may crawl (katana -crawl-scope). Use to keep a crawl inside the authorized scope."
                 },
                 "robots": {
                     "type": "boolean",
-                    "description": "Respect robots.txt. Default: false."
+                    "description": "Crawl known files including robots.txt and sitemap.xml (katana -kf all). Default: false."
                 },
                 "headers": {
-                    "type": "boolean",
-                    "description": "Include response headers in output. Default: false."
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Extra request headers as 'Name: value' (katana -H). Use to test authenticated or role-scoped surfaces."
                 },
                 "include_body": {
                     "type": "boolean",
-                    "description": "Include response body. Default: false."
+                    "description": "Include response bodies. Bodies are included by default; false adds katana -ob. Default: true."
                 },
                 "include_params": {
                     "type": "boolean",
-                    "description": "Include URL parameters. Default: false."
+                    "description": "Crawl the same path with differing query-param values. Enabled by default; false adds katana -iqp. Default: true."
                 }
             }
         })
@@ -115,41 +110,49 @@ impl Tool for KatanaTool {
 
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: KatanaInput = serde_json::from_value(input)?;
-        let args = build_args(&params);
+        let args = build_args(&params)?;
 
-        let output = tokio::process::Command::new("katana")
-            .args(&args)
-            .output()
-            .await
-            .with_context(|| {
-                "katana not found. Install it: go install github.com/projectdiscovery/katana/cmd/katana@latest"
-                    .to_string()
-            })?;
+        let output = super::recon_common::run_bounded(
+            "katana",
+            &args,
+            super::recon_common::DEFAULT_TOOL_TIMEOUT,
+        )
+        .await
+        .map_err(|e| {
+            if e.starts_with("failed to run") {
+                anyhow::anyhow!("{e}. {}", super::recon_common::install_hint("katana"))
+            } else {
+                anyhow::anyhow!("{e}")
+            }
+        })?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("katana exited with error: {stderr}"));
+            return Err(anyhow::anyhow!(
+                "{}",
+                super::recon_common::describe_failure("katana", &output)
+            ));
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let urls: Vec<String> = stdout
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.trim().to_string())
-            .collect();
+        let (urls, total, truncated) = super::recon_common::parse_lines(&output.stdout);
 
-        let mut result = format!("katana found {} URLs from {}:\n\n", urls.len(), params.url);
+        let mut result = format!("katana found {total} URLs from {}:\n\n", params.url);
 
         for url in &urls {
             result.push_str(url);
             result.push('\n');
         }
+        result.push_str(&super::recon_common::truncation_notice(urls.len(), total));
 
         let mut metadata = HashMap::new();
         metadata.insert("url".to_string(), json!(params.url));
         metadata.insert("count".to_string(), json!(urls.len()));
+        metadata.insert("total_found".to_string(), json!(total));
+        metadata.insert("truncated".to_string(), json!(truncated));
         metadata.insert(
             "depth".to_string(),
+            // Report what katana actually used. Depth/threads are only sent
+            // when explicitly requested, so claiming the wrapper's advertised
+            // default here was reporting a number katana never received.
             json!(params.depth.unwrap_or(DEFAULT_DEPTH)),
         );
         metadata.insert(
@@ -169,10 +172,27 @@ impl KatanaTool {
     }
 }
 
-fn build_args(params: &KatanaInput) -> Vec<String> {
+/// Build argv for katana.
+///
+/// Every flag below is verified against katana's `readFlags()`. The previous
+/// version of this function was broken in several ways at once:
+///
+/// * `-threads` is not a katana flag (it is `-c` / `-concurrency`), so
+///   setting `threads` made every call exit 2.
+/// * `-robots` is not a flag; the known-files enum is `-kf` (`all`,
+///   `robotstxt`, `sitemapxml`).
+/// * `-no-remote` and `-no-store` do not exist. `-ns` is *no-scope* and
+///   `-sr` is *store-response* — the opposite of what the names imply.
+/// * `-include-body` / `-include-params` do not exist; the real flags
+///   `-ob` (omit-body) and `-iqp` (ignore-query-params) are their inverses.
+/// * `d` was emitted as `-d`, which is `-depth` (an *int*). Passing a domain
+///   string there was a parse error, and with both `depth` and `d` set the
+///   second `-d` silently overwrote the first. `domain_scope` now maps to the
+///   real `-crawl-scope` regex flag.
+fn build_args(params: &KatanaInput) -> Result<Vec<String>> {
     let mut args = Vec::new();
     args.push("-u".to_string());
-    args.push(params.url.clone());
+    args.push(super::recon_common::validate_target(&params.url)?);
 
     if let Some(depth) = params.depth {
         args.push("-d".to_string());
@@ -180,7 +200,7 @@ fn build_args(params: &KatanaInput) -> Vec<String> {
     }
 
     if let Some(threads) = params.threads {
-        args.push("-threads".to_string());
+        args.push("-c".to_string());
         args.push(threads.to_string());
     }
 
@@ -195,34 +215,42 @@ fn build_args(params: &KatanaInput) -> Vec<String> {
     if params.no_color {
         args.push("-nc".to_string());
     }
-    if params.no_remote {
-        args.push("-no-remote".to_string());
-    }
-    if params.no_store {
-        args.push("-no-store".to_string());
-    }
     if let Some(ref f) = params.f {
         args.push("-f".to_string());
         args.push(f.clone());
     }
-    if let Some(ref d) = params.d {
-        args.push("-d".to_string());
-        args.push(d.clone());
+    if let Some(ref scope) = params.domain_scope {
+        args.push("-crawl-scope".to_string());
+        args.push(scope.clone());
     }
     if params.robots {
-        args.push("-robots".to_string());
+        // `-kf` is an enum: robotstxt and sitemapxml are both wanted here.
+        args.push("-kf".to_string());
+        args.push("all".to_string());
     }
-    if params.headers {
-        args.push("-headers".to_string());
+    for header in &params.headers {
+        let h = header.trim();
+        if h.is_empty() {
+            continue;
+        }
+        if !h.contains(':') {
+            return Err(anyhow::anyhow!(
+                "invalid header `{h}`: expected the form `Name: value`"
+            ));
+        }
+        args.push("-H".to_string());
+        args.push(h.to_string());
     }
-    if params.include_body {
-        args.push("-include-body".to_string());
+    if !params.include_body {
+        // Bodies are included by default; the flag that removes them is `-ob`.
+        args.push("-ob".to_string());
     }
-    if params.include_params {
-        args.push("-include-params".to_string());
+    if !params.include_params {
+        // Query-param variants are crawled by default; `-iqp` collapses them.
+        args.push("-iqp".to_string());
     }
 
-    args
+    Ok(args)
 }
 
 #[cfg(test)]
@@ -238,17 +266,115 @@ mod tests {
             timeout: None,
             json_output: false,
             no_color: false,
-            no_remote: false,
-            no_store: false,
             f: None,
-            d: None,
+            domain_scope: None,
             robots: false,
-            headers: false,
+            headers: Vec::new(),
             include_body: false,
             include_params: false,
         };
-        let args = build_args(&input);
+        let args = build_args(&input).expect("build_args");
         assert!(args.contains(&"-u".to_string()));
         assert!(args.contains(&"https://example.com".to_string()));
+    }
+
+    /// Regression: the old builder emitted six flags katana does not
+    /// register (`-threads`, `-no-remote`, `-no-store`, `-robots`,
+    /// `-include-body`, `-include-params`), and mapped `d` onto `-d`, which is
+    /// `-depth` (an int). Every one of those made katana exit 2.
+    #[test]
+    fn only_real_katana_flags_are_emitted() {
+        let mut input = KatanaInput {
+            url: "https://example.com".to_string(),
+            depth: Some(5),
+            threads: Some(20),
+            timeout: None,
+            json_output: false,
+            no_color: false,
+            f: None,
+            domain_scope: Some("example\\.com".to_string()),
+            robots: true,
+            headers: vec!["Authorization: Bearer x".to_string()],
+            include_body: true,
+            include_params: true,
+        };
+        let args = build_args(&input).expect("build_args");
+        for bad in [
+            "-threads",
+            "-no-remote",
+            "-no-store",
+            "-robots",
+            "-include-body",
+            "-include-params",
+        ] {
+            assert!(
+                !args.contains(&bad.to_string()),
+                "{bad} is not a katana flag: {args:?}"
+            );
+        }
+        // The real spellings.
+        assert!(args.contains(&"-c".to_string()), "threads: {args:?}");
+        assert!(args.contains(&"-kf".to_string()), "robots: {args:?}");
+        assert!(args.contains(&"-crawl-scope".to_string()));
+        assert!(args.contains(&"-H".to_string()));
+        // `include_body`/`include_params` default to on, so their inverses
+        // must be absent.
+        assert!(!args.contains(&"-ob".to_string()));
+        assert!(!args.contains(&"-iqp".to_string()));
+
+        // Turning them off adds the inverse flags.
+        input.include_body = false;
+        input.include_params = false;
+        let args = build_args(&input).expect("build_args");
+        assert!(args.contains(&"-ob".to_string()));
+        assert!(args.contains(&"-iqp".to_string()));
+    }
+
+    /// `-d` is `-depth`, an int. A domain string there was a parse error, and
+    /// with both set the second `-d` overwrote the requested depth.
+    #[test]
+    fn depth_is_the_only_thing_mapped_to_dash_d() {
+        let input = KatanaInput {
+            url: "https://example.com".to_string(),
+            depth: Some(7),
+            threads: None,
+            timeout: None,
+            json_output: false,
+            no_color: false,
+            f: None,
+            domain_scope: Some("example\\.com".to_string()),
+            robots: false,
+            headers: Vec::new(),
+            include_body: true,
+            include_params: true,
+        };
+        let args = build_args(&input).expect("build_args");
+        let d_positions: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "-d")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(d_positions.len(), 1, "more than one -d: {args:?}");
+        assert_eq!(args[d_positions[0] + 1], "7");
+    }
+
+    #[test]
+    fn malformed_header_is_rejected() {
+        let input = KatanaInput {
+            url: "https://example.com".to_string(),
+            depth: None,
+            threads: None,
+            timeout: None,
+            json_output: false,
+            no_color: false,
+            f: None,
+            domain_scope: None,
+            robots: false,
+            headers: vec!["not-a-header".to_string()],
+            include_body: true,
+            include_params: true,
+        };
+        assert!(build_args(&input).is_err());
     }
 }

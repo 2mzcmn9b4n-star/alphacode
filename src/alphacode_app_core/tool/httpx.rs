@@ -1,5 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput};
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -131,35 +131,48 @@ impl Tool for HttpxTool {
                  {{\"targets\": [\"https://example.com\"], \"title\": true, \"tech_detect\": true}}"
             ));
         }
-        let args = build_args(&params);
+        let args = build_args(&params)?;
 
-        let output = tokio::process::Command::new("httpx")
-            .args(&args)
-            .output()
-            .await
-            .with_context(|| {
-                "httpx not found. Install it: go install github.com/projectdiscovery/httpx/cmd/httpx@latest"
-                    .to_string()
-            })?;
+        let output = super::recon_common::run_bounded(
+            "httpx",
+            &args,
+            super::recon_common::DEFAULT_TOOL_TIMEOUT,
+        )
+        .await
+        .map_err(|e| {
+            if e.starts_with("failed to run") {
+                anyhow::anyhow!("{e}. {}", super::recon_common::install_hint("httpx"))
+            } else {
+                anyhow::anyhow!("{e}")
+            }
+        })?;
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        // The Python `httpx` CLI (a different tool with the same name) prints
+        // `Usage: httpx [OPTIONS] URL`. When it shadows ProjectDiscovery's
+        // httpx on PATH, every probe fails with a usage error — detect it and
+        // tell the user how to fix PATH instead of a cryptic usage line.
+        //
+        // Checked on *both* the success and failure paths: the Python httpx is
+        // a perfectly valid CLI that exits 0 for `httpx https://target`, so
+        // gating this on a non-zero exit let its output flow into the results
+        // as though it were a real scan. The match is anchored on the stable
+        // fragment rather than the full sentence, which Click has varied
+        // (double space, `Try 'httpx -h' for help`) across releases.
+        let python_httpx = format!("{stdout}\n{stderr}");
+        if python_httpx.contains("[OPTIONS] URL") {
+            return Err(anyhow::anyhow!(
+                "httpx failed: the `httpx` on PATH is the Python HTTP client, not \
+                 ProjectDiscovery's httpx. Install the right binary \
+                 (go install github.com/projectdiscovery/httpx/cmd/httpx@latest) \
+                 and make sure it comes first on PATH (`where httpx` on Windows, \
+                 `which -a httpx` elsewhere)."
+            ));
+        }
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            // The Python `httpx` CLI (a different tool with the same name) prints
-            // `Usage: httpx [OPTIONS] URL`. When it shadows ProjectDiscovery's
-            // httpx on PATH, every probe fails with a usage error — detect it
-            // and tell the user how to fix PATH instead of a cryptic usage line.
-            if stderr.contains("Usage: httpx [OPTIONS] URL")
-                || stdout.contains("Usage: httpx [OPTIONS] URL")
-            {
-                return Err(anyhow::anyhow!(
-                    "httpx failed: the `httpx` on PATH is the Python HTTP client, not \
-                     ProjectDiscovery's httpx. Install the right binary \
-                     (go install github.com/projectdiscovery/httpx/cmd/httpx@latest) \
-                     and make sure it comes first on PATH (`where httpx` on Windows, \
-                     `which -a httpx` elsewhere)."
-                ));
-            }
             let detail = if stderr.is_empty() {
                 if stdout.is_empty() {
                     "no output (binary exited non-zero with empty stderr; \
@@ -175,29 +188,27 @@ impl Tool for HttpxTool {
             return Err(anyhow::anyhow!("httpx exited with error: {detail}"));
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let lines: Vec<String> = stdout
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.trim().to_string())
-            .collect();
+        let (lines, total, truncated) = super::recon_common::parse_lines(&output.stdout);
 
-        let mut result = format!("httpx found {} live hosts:\n\n", lines.len());
+        let mut result = format!("httpx found {total} live hosts:\n\n");
 
         for line in &lines {
             result.push_str(line);
             result.push('\n');
         }
+        result.push_str(&super::recon_common::truncation_notice(lines.len(), total));
 
         let mut metadata = HashMap::new();
         metadata.insert("count".to_string(), json!(lines.len()));
+        metadata.insert("total_found".to_string(), json!(total));
+        metadata.insert("truncated".to_string(), json!(truncated));
         metadata.insert("tech_detect".to_string(), json!(params.tech_detect));
         metadata.insert("title".to_string(), json!(params.title));
         metadata.insert("tls".to_string(), json!(params.tls));
         metadata.insert("cdn".to_string(), json!(params.cdn));
 
         Ok(ToolOutput::new(result)
-            .with_title(format!("httpx: {} hosts probed", lines.len()))
+            .with_title(format!("httpx: {total} hosts probed"))
             .with_metadata(json!(metadata)))
     }
 }
@@ -258,22 +269,29 @@ fn normalize_httpx_input(input: &Value) -> Result<HttpxInput> {
     Ok(params)
 }
 
-fn build_args(params: &HttpxInput) -> Vec<String> {
+fn build_args(params: &HttpxInput) -> Result<Vec<String>> {
     let mut args = Vec::new();
 
     if let Some(ref list) = params.list {
         args.push("-l".to_string());
-        args.push(list.clone());
+        args.push(super::recon_common::validate_file_arg(list, "list")?);
     } else if !params.targets.is_empty() {
         // `-u` is the long-standing per-target flag across httpx releases.
         for target in &params.targets {
             args.push("-u".to_string());
-            args.push(target.clone());
+            args.push(super::recon_common::validate_target(target)?);
         }
     }
 
     if let Some(ref codes) = params.status_codes {
-        args.push("-status-code".to_string());
+        // `-mc` / `-match-code`, NOT `-status-code`. httpx registers
+        // `-sc, -status-code` as a *boolean probe* ("display response
+        // status-code"), so it consumes no value: the old
+        // `-status-code 200,404` made Go's flag package treat `200,404` as a
+        // positional target, so httpx probed a host literally named
+        // `200,404` while applying no filter at all. The matcher is the flag
+        // that actually filters.
+        args.push("-match-code".to_string());
         args.push(codes.clone());
     }
 
@@ -290,19 +308,25 @@ fn build_args(params: &HttpxInput) -> Vec<String> {
         args.push("-content-type".to_string());
     }
     if params.response_size {
-        args.push("-response-size".to_string());
+        // httpx has no `-response-size`; the size probe is `-cl` /
+        // `-content-length`. (`-rsts`/`-rstr` cap the *saved* response, which
+        // is a different thing.)
+        args.push("-content-length".to_string());
     }
     if params.method {
         args.push("-method".to_string());
     }
     if params.tls {
-        args.push("-tls".to_string());
+        // There is no bare `-tls`; the certificate-grabbing flag is
+        // `-tls-grab`.
+        args.push("-tls-grab".to_string());
     }
     if params.cdn {
         args.push("-cdn".to_string());
     }
     if params.chains {
-        args.push("-chains".to_string());
+        // No `-chains`; the redirect-chain flag is `-include-chain`.
+        args.push("-include-chain".to_string());
     }
     if params.follow_redirects {
         args.push("-follow-redirects".to_string());
@@ -319,7 +343,7 @@ fn build_args(params: &HttpxInput) -> Vec<String> {
     args.push("-timeout".to_string());
     args.push(timeout.to_string());
 
-    args
+    Ok(args)
 }
 
 #[cfg(test)]
@@ -364,7 +388,7 @@ mod tests {
             follow_redirects: false,
             no_color: false,
         };
-        let args = build_args(&input);
+        let args = build_args(&input).expect("build_args");
         assert!(args.contains(&"-l".to_string()));
         assert!(args.contains(&"subs.txt".to_string()));
         assert!(args.contains(&"-title".to_string()));

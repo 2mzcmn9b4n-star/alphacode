@@ -7,7 +7,12 @@ description: Client-side request signing and anti-bot token reversal for bug bou
 
 You hit a request you cannot replay. Burp Repeater returns `401 invalid signature` or `403 bot detected` even though the browser/app does it fine. There is a `sign`, `sig`, `X-Signature`, `_token`, `nonce`, `X-Acf-Sensor-Data`, or encrypted body the client computes.
 
-> **Why a bug bounty hunter cares:** the signature is not the bug. The signature is the **lock on the door**. Behind it is an API the program assumed only their own client would ever reach — so that API is often under-tested for IDOR, BOLA, mass assignment, and business logic. Reversing the signer is the cost of admission; the **payout** comes from what you fuzz once you're inside. Never report "I reversed your sign algorithm" as a finding — that is N/A.
+> **Why a security reviewer cares:** the signature is not the bug. The
+> signature is the **lock on the door**. Behind it is an API the program
+> assumed only their own client would ever reach — so that API is often
+> under-tested for IDOR, BOLA, mass assignment, and business logic. Never
+> report "I reversed your sign algorithm" as a finding — that is N/A on its
+> own. What matters is whether the API behind it enforces authorization.
 
 ---
 

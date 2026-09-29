@@ -60,13 +60,17 @@ description: Finding lifecycle management — Track security findings through st
 ### Verified
 - **What:** Promoted with proof semantics. The vulnerability is real and exploitable.
 - **Evidence:** Full PoC, reproduction steps, impact demonstrated.
-- **Action:** Write report. Build chain if possible. Assign severity.
-- **Example:** "IDOR + mass assignment = admin takeover. Full chain documented."
+- **Action:** Write the report at the severity you demonstrated. Assign severity.
+- **Example:** "IDOR confirmed — /api/users/123 with a second user's token returns that user's email. Read-only; no write path tested."
+
+**Verified is where the review of a finding stops.** Do not keep escalating a
+proven finding to raise its severity — see the impact-sufficiency rule in the
+`bugbounty` skill. If a chain seems relevant, record it as an analyst note.
 
 ### Reportable
 - **What:** Ready for submission. Has evidence + replay/exemption.
 - **Evidence:** Complete PoC, reproduction steps, impact, severity, remediation.
-- **Action:** Submit to bug bounty program or client.
+- **Action:** Submit to the program or hand to the client.
 - **Example:** Report written with severity, CVSS, and fix recommendation.
 
 ### Rejected
@@ -115,12 +119,14 @@ For every finding, track:
 ### False Positive Check
 - [ ] Does it return real data? (not mock/empty)
 - [ ] Is it reproducible?
-- [ ] Is it intended behavior?
+- [ ] **Is it intended behavior?** (was this resource meant to be reachable
+      by this actor? public content shown to a logged-in user is the feature
+      working, not a vulnerability)
 - [ ] Is there a known fix?
 
-### Chain Opportunities
-- Can this be chained with FND-XXX? [Description]
-- What would the combined impact be? [Impact]
+### Compound Risk (analyst note, not a test)
+- Might this compound with another finding? [Note only — do not execute]
+- Reported as context for the owner to prioritize, not as demonstrated impact
 
 ### Remediation
 [How to fix this vulnerability]
@@ -188,21 +194,23 @@ OBSERVED/VERIFIED → STALE:
 Maintain a tracker across your operation:
 
 ```markdown
-## Finding Tracker — example.com Pentest
+## Finding Tracker — example.com assessment
 
-| ID | Type | Endpoint | State | Severity | Chain |
-|----|------|----------|-------|----------|-------|
-| FND-001 | IDOR | /api/users/{id} | Verified | High | → ATO |
-| FND-002 | SQLi | /search | Observed | Critical | → RCE |
-| FND-003 | XSS | /comments | Candidate | Medium | → CSRF |
-| FND-004 | Open Redirect | /redirect | Rejected | - | - |
-| FND-005 | CORS | /api | Stale | - | - |
+| ID | Type | Endpoint | State | Severity | Note |
+|----|------|----------|-------|----------|------|
+| FND-001 | IDOR | /api/users/{id} | Verified | High | read-only, not escalated |
+| FND-002 | SQLi | /search | Observed | Critical | |
+| FND-003 | XSS | /comments | Candidate | Medium | |
+| FND-004 | Open Redirect | /redirect | Rejected | - | warning interstitial = designed behavior |
+| FND-005 | CORS | /api | Stale | - | |
 
-### Chain Map
-- FND-001 (IDOR) + FND-006 (Mass Assignment) → ATO (Critical)
-- FND-002 (SQLi) → Database Dump (Critical)
-- FND-003 (XSS) + FND-007 (CSRF) → Session Hijack (High)
+### Coverage Notes
+- Not tested: admin panel (out of scope, no test account)
+- Rejected with evidence: FND-004 (interstitial is the intended control)
 ```
+
+Severity here is the **demonstrated** severity. Do not raise a row's severity
+to reflect a chain you did not execute.
 
 ---
 

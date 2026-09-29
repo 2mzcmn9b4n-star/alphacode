@@ -314,7 +314,15 @@ impl HttpFlowTool {
 
             // Per-request timeout (default 60s, max 120s) so a slow server
             // cannot block the agent turn indefinitely.
-            let timeout_secs = params.timeout.unwrap_or(60).min(120);
+            //
+            // `0` is treated as "unset" rather than passed through. `Duration::from_secs(0)`
+            // fails every request instantly, so a caller writing
+            // `{"timeout": 0}` to mean "no limit" got a wall of transport
+            // errors instead of a working request.
+            let timeout_secs = match params.timeout {
+                Some(0) | None => 60,
+                Some(n) => n.min(120),
+            };
             request_builder = request_builder.timeout(std::time::Duration::from_secs(timeout_secs));
 
             // Attach cookies from the jar to this request.
@@ -408,6 +416,16 @@ impl HttpFlowTool {
             }
 
             let body = String::from_utf8_lossy(&body_bytes).into_owned();
+
+            // Detect bot protection (Datadome, Cloudflare, etc.)
+            if Self::detect_bot_protection(status, &body, &response_headers) {
+                return Err(anyhow::anyhow!(
+                    "Bot protection detected (status {}). The target is using Datadome/Cloudflare bot protection. \
+                     Use the browser tool instead of httpflow for this target. \
+                     The browser tool can handle JavaScript challenges and CAPTCHAs.",
+                    status
+                ));
+            }
 
             // Handle redirects
             if follow && is_redirect(status) {
@@ -617,6 +635,61 @@ impl HttpFlowTool {
                 session_name
             ))),
         }
+    }
+
+    /// Detect bot protection (Datadome, Cloudflare, etc.)
+    ///
+    /// Returns true if the response indicates bot protection is in place.
+    fn detect_bot_protection(
+        status: u16,
+        body: &str,
+        headers: &HashMap<String, String>,
+    ) -> bool {
+        // Check for common bot protection status codes
+        if matches!(status, 403 | 429 | 503) {
+            // Check for Datadome
+            if body.contains("datadome") || body.contains("DataDome") {
+                return true;
+            }
+            // Check for Cloudflare
+            if body.contains("cloudflare") || body.contains("Cloudflare") {
+                return true;
+            }
+            // Check for PerimeterX
+            if body.contains("perimeterx") || body.contains("PerimeterX") {
+                return true;
+            }
+            // Check for Akamai
+            if body.contains("akamai") || body.contains("Akamai") {
+                return true;
+            }
+            // Check for generic CAPTCHA
+            if body.contains("captcha") || body.contains("CAPTCHA") {
+                return true;
+            }
+            // Check for "Access Denied" or "Blocked"
+            if body.contains("Access Denied") || body.contains("access denied") {
+                return true;
+            }
+            if body.contains("blocked") || body.contains("Blocked") {
+                return true;
+            }
+        }
+
+        // Check headers for bot protection indicators
+        if let Some(server) = headers.get("server") {
+            if server.contains("cloudflare") || server.contains("Cloudflare") {
+                return true;
+            }
+        }
+
+        if let Some(cf_ray) = headers.get("cf-ray") {
+            if !cf_ray.is_empty() {
+                return true;
+            }
+        }
+
+        false
     }
 }
 

@@ -15,6 +15,44 @@ use ratatui::prelude::*;
 /// - Input masking support (for passwords/secrets)
 pub struct EnhancedInput;
 
+/// Safe wrapper for character width computation that never panics.
+/// Returns 0 for control characters, 1 for narrow, 2 for wide (CJK/emoji).
+#[inline]
+fn safe_char_width(c: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
+/// Safe wrapper for string width computation that never panics.
+#[inline]
+fn safe_str_width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
+/// Truncate a string to at most `max_width` display columns, appending an
+/// ellipsis when content is dropped. Never panics on multi-byte boundaries.
+#[allow(dead_code)]
+fn safe_truncate(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if safe_str_width(s) <= max_width {
+        return s.to_string();
+    }
+    let budget = max_width.saturating_sub(1);
+    let mut result = String::new();
+    let mut width = 0;
+    for c in s.chars() {
+        let cw = safe_char_width(c);
+        if width + cw > budget {
+            break;
+        }
+        width += cw;
+        result.push(c);
+    }
+    result.push('…');
+    result
+}
+
 /// Validation result for user input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationResult {
@@ -219,6 +257,10 @@ impl EnhancedInput {
     /// Given a list of candidates and the current input, returns the
     /// common prefix of all matches that start with the input, plus
     /// the remaining suffix the user needs to type.
+    ///
+    /// Returns `None` when there are no matches, empty input, or empty
+    /// candidates. The common-prefix computation is char-safe and never
+    /// panics on multi-byte boundaries.
     pub fn compute_autocomplete(input: &str, candidates: &[&str]) -> Option<AutoCompleteResult> {
         if input.is_empty() || candidates.is_empty() {
             return None;
@@ -238,17 +280,22 @@ impl EnhancedInput {
             return None;
         }
 
-        // Find common prefix of all matches beyond what the user typed
+        // Find common prefix of all matches beyond what the user typed.
+        // Char-safe: works on char boundaries, never panics.
         let common_prefix = matches
             .iter()
             .map(|m| m.text.as_str())
             .reduce(|a, b| {
-                let len = a
+                let common_len = a
                     .chars()
                     .zip(b.chars())
                     .take_while(|(ca, cb)| ca == cb)
                     .count();
-                let end = a.char_indices().nth(len).map(|(i, _)| i).unwrap_or(a.len());
+                let end = a
+                    .char_indices()
+                    .nth(common_len)
+                    .map(|(i, _)| i)
+                    .unwrap_or(a.len());
                 &a[..end]
             })
             .unwrap_or_default();
@@ -336,17 +383,17 @@ impl EnhancedInput {
             ));
         }
 
-        // Truncate if too long
+        // Truncate if too long — use safe width computation
         let total_width: usize = spans
             .iter()
-            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+            .map(|s| safe_str_width(s.content.as_ref()))
             .sum();
 
         if total_width > width {
             let mut result = Vec::new();
             let mut current_w = 0;
             for span in spans {
-                let w = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
+                let w = safe_str_width(span.content.as_ref());
                 if current_w + w > width {
                     break;
                 }
@@ -562,10 +609,7 @@ impl EnhancedInput {
 
             let mut visible_start;
             let mut visible_end;
-            let total_display_width: usize = chars
-                .iter()
-                .map(|c| unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0))
-                .sum();
+            let total_display_width: usize = chars.iter().map(|c| safe_char_width(*c)).sum();
 
             if total_display_width <= content_width.saturating_sub(1) {
                 visible_start = 0;
@@ -575,7 +619,7 @@ impl EnhancedInput {
                 let mut used_w = 0;
                 visible_end = char_count;
                 for (i, c) in chars.iter().enumerate() {
-                    let cw = unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0);
+                    let cw = safe_char_width(*c);
                     if used_w + cw > content_width.saturating_sub(1) {
                         visible_end = i;
                         break;
@@ -587,7 +631,7 @@ impl EnhancedInput {
                 let mut used_w = 0;
                 visible_start = 0;
                 for (i, c) in chars.iter().enumerate().rev() {
-                    let cw = unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0);
+                    let cw = safe_char_width(*c);
                     if used_w + cw > content_width.saturating_sub(1) {
                         visible_start = i + 1;
                         break;

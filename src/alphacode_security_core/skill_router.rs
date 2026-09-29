@@ -78,8 +78,15 @@ impl SkillRouter {
             _ => {}
         }
 
-        // Technology-based routing
-        for tech in &scope.technologies {
+        // Technology-based routing.
+        //
+        // `all_technologies()` aggregates the top-level list *plus* per-host
+        // and per-subdomain fingerprints. Reading only `scope.technologies`
+        // missed the common case where a fingerprint lands on a discovered
+        // host, which silently skipped the entire web3 routing path (and any
+        // other technology-specific skill) for exactly the targets most likely
+        // to need it.
+        for tech in scope.all_technologies() {
             let skills = Self::skills_for_technology(&tech.name);
             for skill in skills {
                 if !selected.contains(&skill) {

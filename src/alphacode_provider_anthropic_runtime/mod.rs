@@ -1533,14 +1533,17 @@ async fn run_stream_with_retries(
             let reason = crate::alphacode_provider_core::retry::RetryReason::TransportFault;
             let delay =
                 crate::alphacode_provider_core::retry::backoff_for(reason, attempt - 1, hint);
-            let _ = tx
+            if let Err(e) = tx
                 .send(Ok(StreamEvent::ConnectionPhase {
                     phase: crate::alphacode_message_types::ConnectionPhase::Retrying {
                         attempt: attempt + 1,
                         max: MAX_RETRIES,
                     },
                 }))
-                .await;
+                .await
+            {
+                tracing::debug!("Failed to send retry phase event: {}", e);
+            }
             tokio::time::sleep(delay).await;
             crate::alphacode_base::logging::info(&format!(
                 "Retrying Anthropic API request (attempt {}/{})",
@@ -1723,7 +1726,9 @@ async fn run_stream_with_retries(
                         )))
                         .await;
                 } else {
-                    let _ = tx.send(Err(e)).await;
+                    if let Err(send_err) = tx.send(Err(e)).await {
+                        tracing::debug!("Failed to send error event: {}", send_err);
+                    }
                 }
                 return;
             }

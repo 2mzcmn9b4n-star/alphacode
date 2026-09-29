@@ -136,7 +136,7 @@ impl AccountPicker {
                 return Some(visible_idx);
             }
             rendered_row = rendered_row.saturating_add(1);
-            if rendered_row > row && rendered_row >= list_height {
+            if rendered_row > row {
                 return None;
             }
         }

@@ -65,34 +65,31 @@ POST /api/change-email with same token → succeeds
 <script>window.open('https://target.com/'); document.forms[0].submit();</script>
 ```
 
-## EXPLOIT CHAINS — REAL BOUNTY SCENARIOS
+## IMPACT — WHAT TO PROVE, AND WHERE TO STOP
 
-### Chain 1: CSRF → Email Change → ATO ($5K-$15K)
-```
-1. Find /api/change-email (no CSRF token)
-2. Change victim's email to attacker@email.com
-3. Trigger password reset → full ATO
-```
+Prove the missing control against **your own account** with a reversible
+state change, then stop. That is the complete finding.
 
-### Chain 2: CSRF → Password Reset → ATO ($10K-$25K)
 ```
-1. Find /api/change-password (no CSRF token)
-2. Change password directly → login with new credentials
+/api/change-email on your own account, no token   → sufficient proof
+/api/change-password on your own account            → sufficient proof
+/admin/api/run-command                             → describe, never request
+/oauth/authorize forcing an app grant              → describe, never trigger
 ```
 
-### Chain 3: CSRF → Admin Action → RCE ($20K-$50K)
-```
-1. Find /admin/api/run-command (no CSRF token)
-2. Admin triggers command execution → full server compromise
-```
+The distinction matters: demonstrating that a token check is **absent** is
+review work; performing the privileged action is the attack. Do not send
+requests to admin routes, do not trigger command-execution endpoints, and do
+not complete an OAuth authorization for someone else's account.
 
-### Chain 4: CSRF + Open Redirect → OAuth Theft ($15K-$30K)
-```
-1. CSRF on /oauth/authorize + open redirect
-2. Victim authorizes attacker's app → code leaked → full access
-```
+When a tokenless endpoint reaches a sensitive capability, that is a real and
+serious CSRF — report it as such, describing the worst case rather than
+demonstrating it. Reject at Gate 6: state-changing GETs with no meaningful
+consequence, and CSRF that only affects the attacker's own session.
 
-## HTML/JS EXPLOITS
+## HTML/JS PoC templates
+
+Point these at your own account's harmless action.
 
 ### Auto-Submit Form
 ```html

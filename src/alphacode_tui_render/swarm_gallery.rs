@@ -341,20 +341,23 @@ pub fn render_swarm_chat_cards(members: &[GalleryMember], width: usize) -> Vec<L
         {
             metadata.push(route);
         }
-        let mut tail = format!(" · {}", metadata.join(" · "));
+        let mut tail = String::from(" · ");
+        tail.push_str(&metadata.join(" · "));
         while metadata.len() > 1 && disp_w(&lead) + disp_w(&label) + disp_w(&tail) > width {
             metadata.pop();
-            tail = format!(" · {}", metadata.join(" · "));
+            tail.clear();
+            tail.push_str(" · ");
+            tail.push_str(&metadata.join(" · "));
         }
 
+        let consumed = disp_w(&lead) + disp_w(&label);
         let mut header = vec![
-            Span::styled(lead.clone(), Style::default().fg(rgb(255, 200, 100))),
+            Span::styled(lead, Style::default().fg(rgb(255, 200, 100))),
             Span::styled(
-                label.clone(),
+                label,
                 Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ),
         ];
-        let consumed = disp_w(&lead) + disp_w(&label);
         if consumed + disp_w(&tail) <= width {
             header.push(Span::styled(tail, Style::default().fg(rgb(150, 150, 160))));
         }

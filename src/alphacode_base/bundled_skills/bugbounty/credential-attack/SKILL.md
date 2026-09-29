@@ -140,21 +140,25 @@ Default rate-limit: `--delay 1800 --jitter 60` (30 min/round + ±60s).
 
 ---
 
-## CHAIN PATTERN: SPRAY → AUTHENTICATED /HUNT
+## REPORTING CREDENTIAL TESTING
+
+Report what you proved, at the severity it supports:
 
 ```
-/spray finds valid creds (low-payout finding by itself)
-↓
-Re-run /hunt with the session cookie or bearer token
-↓
-Authenticated /hunt sees admin pages, internal APIs, IDOR on user data
-↓
-Find a P1/P2 IDOR or business-logic bug behind the login wall
-↓
-Chain report: "ATO via spray + IDOR exposes all user PII" (high payout)
+Rate limit absent on login          → Low/Medium, on its own merits
+A known-credential pattern accepted → Medium, note the weak-credential issue
+A single test account you own works → Info, or not reportable
 ```
 
-The spray-only finding alone is **usually rejected** by mature BBPs. The chain is what pays.
+If the program requires demonstrating account impact, ask the user before
+going further. Do **not** use recovered credentials to browse other users'
+data, and do not attempt privilege escalation with them — that crosses from
+"credential testing" into unauthorized access, and it is the single easiest
+way to turn an authorized engagement into an incident.
+
+Where authenticated testing would clearly change the answer, say so as a
+recommendation ("with a test account for role X we could confirm whether
+this reaches admin data") and let the user or program grant it.
 
 ---
 

@@ -1,6 +1,6 @@
 [package]
 name = "alphacode"
-version = "1.0.64"
+version = "1.0.65"
 authors = ["Ali Essam <tlbbeg313@gmail.com>"]
 description = "A coding agent for the terminal. Multi-model orchestration, swarm coordination, and 40+ tools working together — built so the changes it makes are the smallest ones that solve the problem."
 edition = "2024"
@@ -87,6 +87,9 @@ ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 ratatui-image = { version = "10.0.6", default-features = false, features = ["crossterm"] }
 terminal-colorsaurus = "1.0"
+
+# Logging
+tracing = "0.1"
 
 # Unicode
 unicode-width = "0.2"

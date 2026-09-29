@@ -206,11 +206,9 @@ impl App {
             .as_ref()
             .map(estimate_pending_catchup_resume_bytes)
             .unwrap_or(0);
-        let input_undo_stack_bytes: usize = self
-            .input_undo_stack
-            .iter()
-            .map(|(text, _)| text.capacity())
-            .sum();
+        // Maintained incrementally by the undo-stack helpers, so this is O(1)
+        // rather than a re-summation over every retained snapshot.
+        let input_undo_stack_bytes: usize = self.input_undo_stack_bytes;
         let stashed_input_bytes = self
             .stashed_input
             .as_ref()

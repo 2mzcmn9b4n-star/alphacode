@@ -108,7 +108,16 @@ impl HypothesisSet {
             }
             let score = urgency_score(h);
             let best_score = best.map(urgency_score).unwrap_or(-1);
-            if score > best_score {
+            // Ties are broken on id so the result is stable. Without this the
+            // winner was whichever hypothesis the randomized `HashMap` order
+            // happened to yield first, so two equally-urgent hypotheses picked
+            // a different one on every run — which defeats the point of
+            // determinism for a replanning loop.
+            let better = match best {
+                None => true,
+                Some(current) => score > best_score || (score == best_score && h.id < current.id),
+            };
+            if better {
                 best = Some(h);
             }
         }

@@ -203,13 +203,55 @@ pub fn rollback_pending_activation_for_session(session_id: &str) -> Result<Optio
     Ok(Some(pending.new_version))
 }
 
+/// Validate a version string that is about to be used as a single path
+/// component under `builds/versions/`.
+///
+/// Versions reach us from the GitHub releases API (`tag_name`) and from
+/// `main-<sha>` labels, so they are untrusted input for path purposes. Without
+/// this check a tag such as `v1.0.0/../../../../Startup` clears the semver gate
+/// — `version_is_newer` only reads the first three dot-separated tokens and
+/// coerces parse failures to `0`, so `"1"`, `"0"`, `"0/../../../../Startup"`
+/// compares as `(1, 0, 0)` and beats any installed `0.x.y` — and then steers
+/// the `fs::copy` of the downloaded archive to an attacker-chosen destination,
+/// after which `stable`, `current` and the PATH launcher get repointed at it.
+///
+/// A legitimate version is digits and dots with an optional pre-release or
+/// build suffix, so allow exactly that and nothing else.
+pub fn safe_version_component(raw: &str) -> Result<String> {
+    let v = raw.trim().trim_start_matches('v');
+    if v.is_empty() {
+        anyhow::bail!("release has an empty version (from {raw:?})");
+    }
+    // Real versions are far shorter; this stops a hostile tag from producing an
+    // absurdly long path component in the first place.
+    if v.len() > 64 {
+        anyhow::bail!("release version {raw:?} is implausibly long");
+    }
+    if !v
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+    {
+        anyhow::bail!("release version {raw:?} contains characters that are not path-safe");
+    }
+    // `..`, an empty segment, or a leading/trailing dot are never valid, and are
+    // exactly the shapes a traversal attempt takes.
+    if v.contains("..") || v.split('.').any(str::is_empty) {
+        anyhow::bail!("release version {raw:?} is not a single plain path component");
+    }
+    Ok(v.to_string())
+}
+
 /// Install a binary at a specific immutable version path.
 pub fn install_binary_at_version(source: &std::path::Path, version: &str) -> Result<PathBuf> {
     if !source.exists() {
         anyhow::bail!("Binary not found at {:?}", source);
     }
 
-    let dest_dir = builds_dir()?.join("versions").join(version);
+    // Choke point: every install path funnels through here, so validating the
+    // component once here covers callers that pass `tag_name` or a `main-<sha>`
+    // label straight through.
+    let version = safe_version_component(version)?;
+    let dest_dir = builds_dir()?.join("versions").join(&version);
     storage::ensure_dir(&dest_dir)?;
 
     let dest = dest_dir.join(binary_name());
@@ -924,3 +966,88 @@ pub fn update_canary_symlink(hash: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod safe_version_component_tests {
+    use super::safe_version_component;
+
+    /// Ordinary tags must pass through unchanged, minus the `v` prefix.
+    #[test]
+    fn accepts_ordinary_versions() {
+        for raw in [
+            "v1.0.64",
+            "1.0.64",
+            "v1.2.3-rc.1",
+            "v1.0.0+build.5",
+            "v0.1.0_alpha",
+            "main-abc1234",
+        ] {
+            let v = safe_version_component(raw)
+                .unwrap_or_else(|e| panic!("expected {raw:?} to be accepted: {e}"));
+            assert!(!v.contains('\\') && !v.contains('/'), "{raw:?} -> {v:?}");
+            assert!(
+                !v.starts_with('v'),
+                "the `v` prefix should be stripped: {v:?}"
+            );
+        }
+    }
+
+    /// Anything that could escape `builds/versions/` must be rejected. The tag
+    /// comes off the GitHub releases API, and `version_is_newer` only reads the
+    /// first three dot-separated tokens (coercing parse failures to 0), so
+    /// `v1.0.0/../../../../Startup` compares as `(1, 0, 0)` and beats any
+    /// installed `0.x.y`.
+    #[test]
+    fn rejects_traversal_and_path_separators() {
+        for raw in [
+            "v1.0.0/../../../../Startup",
+            "v1.0.0\\..\\..\\Windows",
+            "../../../etc",
+            "..",
+            ".",
+            "v1..2",
+            ".hidden",
+            "trailing.",
+            "v1.0.0/Windows/System32",
+        ] {
+            assert!(
+                safe_version_component(raw).is_err(),
+                "expected {raw:?} to be rejected"
+            );
+        }
+    }
+
+    /// No separators at all may appear, and the length is bounded so a hostile
+    /// tag cannot produce an absurd path component.
+    #[test]
+    fn rejects_unsafe_characters_and_overlong_input() {
+        for raw in [
+            "v1.0.0; rm -rf ~",
+            "v1.0.0|cat",
+            "v1.0.0$(id)",
+            "v1.0.0`id`",
+            "v1.0.0:stream",
+            "",
+            "v",
+        ] {
+            assert!(
+                safe_version_component(raw).is_err(),
+                "expected {raw:?} to be rejected"
+            );
+        }
+        let long = format!("v{}", "1".repeat(200));
+        assert!(safe_version_component(&long).is_err());
+    }
+
+    /// Surrounding whitespace is trimmed rather than rejected: a tag with a
+    /// stray trailing space should still install, and trimming it is what makes
+    /// the space harmless.
+    #[test]
+    fn trims_surrounding_whitespace() {
+        assert_eq!(
+            safe_version_component("  v1.0.64  ").unwrap(),
+            "1.0.64",
+            "whitespace should be trimmed, not treated as path-unsafe"
+        );
+    }
+}

@@ -31,6 +31,10 @@ pub(super) const BUNDLED_SKILLS: &[BundledSkill] = &[
         body: include_str!("bundled_skills/bugbounty/SKILL.md"),
         references: &[
             (
+                "orchestrate",
+                include_str!("bundled_skills/bugbounty/orchestrate/SKILL.md"),
+            ),
+            (
                 "advanced-techniques",
                 include_str!("bundled_skills/bugbounty/advanced-techniques/SKILL.md"),
             ),
@@ -209,6 +213,46 @@ pub(super) const BUNDLED_SKILLS: &[BundledSkill] = &[
             (
                 "hunt-path-traversal",
                 include_str!("bundled_skills/bugbounty/hunt-path-traversal/SKILL.md"),
+            ),
+            (
+                "control-verification",
+                include_str!("bundled_skills/bugbounty/control-verification/SKILL.md"),
+            ),
+            (
+                "severity-engine",
+                include_str!("bundled_skills/bugbounty/severity-engine/SKILL.md"),
+            ),
+            (
+                "chain-reasoning",
+                include_str!("bundled_skills/bugbounty/chain-reasoning/SKILL.md"),
+            ),
+            (
+                "manual-blackbox",
+                include_str!("bundled_skills/bugbounty/manual-blackbox/SKILL.md"),
+            ),
+            (
+                "recon-deep",
+                include_str!("bundled_skills/bugbounty/recon-deep/SKILL.md"),
+            ),
+            (
+                "hunt-business-logic",
+                include_str!("bundled_skills/bugbounty/hunt-business-logic/SKILL.md"),
+            ),
+            (
+                "hunt-realtime",
+                include_str!("bundled_skills/bugbounty/hunt-realtime/SKILL.md"),
+            ),
+            (
+                "hunt-storage",
+                include_str!("bundled_skills/bugbounty/hunt-storage/SKILL.md"),
+            ),
+            (
+                "cloud-config",
+                include_str!("bundled_skills/bugbounty/cloud-config/SKILL.md"),
+            ),
+            (
+                "supply-chain",
+                include_str!("bundled_skills/bugbounty/supply-chain/SKILL.md"),
             ),
             (
                 "scripts/install_bugbounty_tools.sh",

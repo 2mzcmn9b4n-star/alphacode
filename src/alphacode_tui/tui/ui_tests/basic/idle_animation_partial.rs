@@ -156,42 +156,6 @@ fn partial_repaint_matches_a_full_frame_at_the_same_animation_time() {
 }
 
 #[test]
-fn debug_repaint_probe_temp() {
-    let _idle_animation = IdleAnimationEnvGuard::enable();
-    let _lock = viewport_snapshot_test_lock();
-    clear_flicker_frame_history_for_tests();
-
-    let first = render_full(&idle_animation_state(1.0), 100, 40);
-    let area1 = crate::alphacode_tui::tui::ui::last_idle_animation_area().expect("animated rectangle");
-    let mut patched = first.backend().buffer().clone();
-    let second = render_full(&idle_animation_state(1.5), 100, 40);
-    let area2 = crate::alphacode_tui::tui::ui::last_idle_animation_area();
-    let expected = second.backend().buffer();
-    crate::alphacode_tui::tui::ui::render_idle_animation_into(&mut patched, area1, 1.5);
-    eprintln!("PROBE area1={area1:?} area2={area2:?}");
-    let mismatches: Vec<_> = patched
-        .content
-        .iter()
-        .zip(expected.content.iter())
-        .enumerate()
-        .filter(|(_, (l, r))| l != r)
-        .map(|(idx, (l, r))| {
-            (
-                idx as u16 % patched.area.width,
-                idx as u16 / patched.area.width,
-                format!("{:?} style={:?}", l.symbol(), l.style()),
-                format!("{:?} style={:?}", r.symbol(), r.style()),
-            )
-        })
-        .collect();
-    for m in mismatches.iter().take(8) {
-        eprintln!("PROBE mismatch={m:?}");
-    }
-    eprintln!("PROBE total={}", mismatches.len());
-    panic!("probe done");
-}
-
-#[test]
 fn advancing_the_animation_actually_changes_the_animated_rows() {
     let _idle_animation = IdleAnimationEnvGuard::enable();
     // Guards against the partial-repaint test passing vacuously: if the

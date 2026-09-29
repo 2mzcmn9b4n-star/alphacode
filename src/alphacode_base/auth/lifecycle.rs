@@ -2546,13 +2546,20 @@ mod tests {
                 &["zai-org/glm-5.3-flash"],
                 "zai-org/glm-5.3-flash",
             ),
-            // Alphax Free serves a single curated free model; it must win
-            // even when the live catalog lists other rows first.
+            // Alphax Free now serves the whole free pool. `kilo-auto/free` must
+            // still win when a paid row sorts ahead of it, and the rest of the
+            // pool must never outrank it either: the default is the user's
+            // first choice and rotation handles the rest on demand.
             (
                 "alphax-free",
                 "openai-compatible:alphax-free",
                 "Alphax Free",
-                &["deepseek-v4-flash", "kilo-auto/free"],
+                &[
+                    "deepseek-v4-flash",
+                    "openai/gpt-5.4",
+                    "kilo-auto/free",
+                    "poolside/laguna-s-2.1:free",
+                ],
                 "kilo-auto/free",
             ),
         ];

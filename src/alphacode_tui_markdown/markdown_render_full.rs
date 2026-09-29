@@ -236,9 +236,12 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                 {
                     // Gradient-colored URL display for links
                     let gradient = crate::alphacode_tui::tui::brand_ux::BrandTheme::gradient();
+                    let url_color = gradient.get(3).copied().unwrap_or_else(|| {
+                        rgb(129, 199, 132) // fallback green
+                    });
                     current_spans.push(Span::styled(
                         format!(" ({})", url),
-                        Style::default().fg(gradient[3]).add_modifier(Modifier::DIM), // sky blue for URLs
+                        Style::default().fg(url_color).add_modifier(Modifier::DIM), // sky blue for URLs
                     ));
                 }
             }
@@ -481,7 +484,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     let frame_color = if lang_label.is_empty() {
                         md_dim_color()
                     } else {
-                        gradient[5] // teal for code blocks with language
+                        gradient.get(5).copied().unwrap_or_else(md_dim_color) // teal for code blocks with language
                     };
                     // Add header with gradient accent
                     if lang_label.is_empty() {

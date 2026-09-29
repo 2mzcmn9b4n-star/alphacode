@@ -1,5 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput};
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -46,15 +46,7 @@ impl Tool for SubfinderTool {
                 },
                 "threads": {
                     "type": "integer",
-                    "description": "Number of concurrent threads. Default: 20."
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "Timeout in seconds per source. Default: 120."
-                },
-                "silent": {
-                    "type": "boolean",
-                    "description": "Suppress output except domains. Default: false."
+                    "description": "Number of concurrent resolver goroutines (subfinder -t). Only affects -active resolution; subfinder's own default is 10."
                 },
                 "verbose": {
                     "type": "boolean",
@@ -66,45 +58,30 @@ impl Tool for SubfinderTool {
 
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: SubfinderInput = normalize_subfinder_input(&input)?;
-        let args = build_args(&params);
+        let args = build_args(&params)?;
 
-        let output = tokio::process::Command::new("subfinder")
-            .args(&args)
-            .output()
-            .await
-            .with_context(|| {
-                "subfinder not found or failed to execute. Install it: go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
-                    .to_string()
-            })?;
+        let output = super::recon_common::run_bounded(
+            "subfinder",
+            &args,
+            super::recon_common::DEFAULT_TOOL_TIMEOUT,
+        )
+        .await
+        .map_err(|e| {
+            // Name the concrete install command rather than a bare "not found",
+            // so the model (or the user) can act on it directly.
+            if e.starts_with("failed to run") {
+                anyhow::anyhow!("{e}. {}", super::recon_common::install_hint("subfinder"))
+            } else {
+                anyhow::anyhow!("{e}")
+            }
+        })?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            // Prefer stderr, fall back to stdout: some builds report the
-            // failure on stdout, and an empty message leaves the model with
-            // nothing to adapt to (it then repeats the call until refused).
-            let detail = if !stderr.is_empty() {
-                crate::alphacode_core::util::truncate_str(&stderr, 500).to_string()
-            } else if !stdout.is_empty() {
-                crate::alphacode_core::util::truncate_str(&stdout, 500).to_string()
-            } else {
-                format!(
-                    "no output for domain '{}' (exit non-zero with empty stderr; \
-                     the target may have no passive sources, the network may block \
-                     source APIs, or provider keys may be missing — try `\"all\": true` \
-                     or verify the domain resolves)",
-                    params.domain
-                )
-            };
-            return Err(anyhow::anyhow!("subfinder exited with error: {detail}"));
+            let detail = super::recon_common::describe_failure("subfinder", &output);
+            return Err(anyhow::anyhow!("{detail}"));
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let domains: Vec<String> = stdout
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.trim().to_string())
-            .collect();
+        let (domains, total, truncated) = super::recon_common::parse_lines(&output.stdout);
 
         let mut result = format!(
             "Subfinder found {} subdomains for {}:\n\n",
@@ -116,10 +93,16 @@ impl Tool for SubfinderTool {
             result.push_str(domain);
             result.push('\n');
         }
+        result.push_str(&super::recon_common::truncation_notice(
+            domains.len(),
+            total,
+        ));
 
         let mut metadata = HashMap::new();
         metadata.insert("domain".to_string(), json!(params.domain));
         metadata.insert("count".to_string(), json!(domains.len()));
+        metadata.insert("total_found".to_string(), json!(total));
+        metadata.insert("truncated".to_string(), json!(truncated));
         metadata.insert("all_sources".to_string(), json!(params.all));
 
         Ok(ToolOutput::new(result)
@@ -153,17 +136,11 @@ fn normalize_subfinder_input(input: &Value) -> Result<SubfinderInput> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            let mut keys: Vec<&String> = obj.keys().collect();
-            keys.sort();
-            let keys = keys
-                .iter()
-                .map(|k| format!("`{k}`"))
-                .collect::<Vec<_>>()
-                .join(", ");
             anyhow::anyhow!(
-                "missing field `domain`. Received keys: {keys}. \
+                "missing field `domain`. {}. \
                  Provide the base domain as `domain`, e.g. \
-                 {{\"domain\": \"example.com\"}}"
+                 {{\"domain\": \"example.com\"}}",
+                super::describe_received_arguments(input)
             )
         })?;
     Ok(SubfinderInput {
@@ -180,17 +157,23 @@ fn normalize_subfinder_input(input: &Value) -> Result<SubfinderInput> {
     })
 }
 
-fn build_args(params: &SubfinderInput) -> Vec<String> {
+fn build_args(params: &SubfinderInput) -> Result<Vec<String>> {
+    let domain = super::recon_common::validate_hostname(&params.domain)?;
+
     let mut args = Vec::new();
     args.push("-d".to_string());
-    args.push(params.domain.clone());
+    args.push(domain);
 
     if params.all {
         args.push("-all".to_string());
     }
 
+    // `-t`, NOT `-threads`. subfinder registers the concurrency knob as
+    // `flagSet.IntVar(&options.Threads, "t", 10, ...)`; there is no long
+    // `-threads` name. Passing it made goflags abort with "flag provided but
+    // not defined" and exit 2, which meant *every* subfinder call failed.
     let threads = params.threads.unwrap_or(DEFAULT_THREADS);
-    args.push("-threads".to_string());
+    args.push("-t".to_string());
     args.push(threads.to_string());
     args.push("-silent".to_string());
 
@@ -198,7 +181,7 @@ fn build_args(params: &SubfinderInput) -> Vec<String> {
         args.push("-v".to_string());
     }
 
-    args
+    Ok(args)
 }
 
 #[cfg(test)]
@@ -225,7 +208,7 @@ mod tests {
             threads: None,
             verbose: false,
         };
-        let args = build_args(&input);
+        let args = build_args(&input).expect("args");
         assert!(args.contains(&"-d".to_string()));
         assert!(args.contains(&"example.com".to_string()));
     }
@@ -238,7 +221,43 @@ mod tests {
             threads: None,
             verbose: false,
         };
-        let args = build_args(&input);
+        let args = build_args(&input).expect("args");
         assert!(args.contains(&"-all".to_string()));
+    }
+
+    /// Regression: `-threads` is not a subfinder flag. It is registered as
+    /// `-t`, so passing the long form made every invocation exit 2 with
+    /// "flag provided but not defined" — the tool was 100% broken.
+    #[test]
+    fn threads_flag_is_the_real_subfinder_flag() {
+        let input = SubfinderInput {
+            domain: "example.com".to_string(),
+            all: false,
+            threads: Some(42),
+            verbose: false,
+        };
+        let args = build_args(&input).expect("args");
+        assert!(args.contains(&"-t".to_string()), "missing -t: {args:?}");
+        assert!(
+            !args.contains(&"-threads".to_string()),
+            "-threads is not a subfinder flag: {args:?}"
+        );
+        let idx = args.iter().position(|a| a == "-t").expect("-t present");
+        assert_eq!(args[idx + 1], "42", "thread value not passed");
+    }
+
+    #[test]
+    fn flag_like_domain_is_rejected_before_spawning() {
+        // A bare `-o` as a domain would be parsed by goflags as a flag, so the
+        // tool would do something other than what was asked with no error.
+        for bad in ["-o", "-all", "-silent", "-json"] {
+            let input = SubfinderInput {
+                domain: bad.to_string(),
+                all: false,
+                threads: None,
+                verbose: false,
+            };
+            assert!(build_args(&input).is_err(), "accepted {bad} as a domain");
+        }
     }
 }

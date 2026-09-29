@@ -22,10 +22,60 @@ use std::sync::LazyLock;
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 
 const MAX_OUTPUT_LEN: usize = 30000;
+/// How much of a child stream to hold in memory while the command runs.
+///
+/// `format_command_output` truncates the *head* of the output at
+/// [`MAX_OUTPUT_LEN`], so nothing past that point could ever reach the model
+/// or the TUI. Reading the whole pipe anyway — which is what `read_to_string`
+/// does — means a chatty command (`cargo build` on a cold target dir, `rg`
+/// across `target/`, a verbose test run) buffers every byte it ever writes, in
+/// stdout and stderr simultaneously, before that cap is applied. That is
+/// unbounded memory for output that is always discarded, and it is the kind of
+/// thing that takes down a session on a large build rather than merely slowing
+/// it down.
+///
+/// The cap is set well above [`MAX_OUTPUT_LEN`] rather than equal to it so that
+/// `smart_stream::filter_output`, which runs before truncation, still sees
+/// enough input to make the same filtering decisions it used to.
+const MAX_CAPTURED_STREAM_BYTES: usize = 4 * MAX_OUTPUT_LEN;
+
+/// Read a child stream into a bounded prefix, then keep draining to EOF.
+///
+/// Draining after the cap is essential, not an optimisation: if the read
+/// stopped at the cap the child would block forever writing into a full pipe
+/// buffer, and the command would never exit. The discarded tail is thrown away
+/// either way, because [`format_command_output`] truncates the head.
+///
+/// Returns lossy UTF-8 rather than erroring: the cap can land in the middle of
+/// a multi-byte sequence, and substituting the replacement character is better
+/// than dropping the entire captured prefix. Read failures are swallowed and
+/// whatever was captured before them is returned, which is exactly what
+/// `let _ = out.read_to_string(&mut buf)` used to leave behind.
+async fn read_stream_capped<R>(reader: &mut R, cap: usize) -> String
+where
+    R: AsyncRead + Unpin,
+{
+    let mut kept: Vec<u8> = Vec::with_capacity(cap.min(64 * 1024));
+    let mut chunk = [0_u8; 16 * 1024];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(read) => {
+                let room = cap.saturating_sub(kept.len());
+                if room > 0 {
+                    let take = room.min(read);
+                    kept.extend_from_slice(&chunk[..take]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&kept).into_owned()
+}
 // Five minutes is long enough for ordinary repository audits and test suites
 // while still promoting genuinely stuck work to the background manager. Callers
 // that need longer can opt into `run_in_background` or pass an explicit timeout.
@@ -686,6 +736,18 @@ fn format_command_output(mut output: String, exit_code: Option<i32>) -> String {
             // Standard shell exit codes: generic failure hint
             output.push_str("\nHint: Command failed. Check the error output above for details.");
         }
+    } else if exit_code.is_none() {
+        // `ExitStatus::code()` is `None` when the process was killed by a signal
+        // (SIGKILL from the OOM killer, SIGTERM from a timeout, SIGINT from a
+        // Ctrl+C). That is a *failure*, not "success with no output": both
+        // branches above use `Option::filter`, so `None` used to fall straight
+        // through to the "ok" marker below. An OOM-killed `cargo build` was
+        // therefore reported to the model as "ok", which is precisely the
+        // false positive this tool's own description warns against ("never
+        // claim a command succeeded unless you actually saw it succeed").
+        output.push_str(
+            "\n\n[terminated by signal; no exit code available — treat this command as FAILED]",
+        );
     }
 
     if output.trim().is_empty() {
@@ -693,10 +755,11 @@ fn format_command_output(mut output: String, exit_code: Option<i32>) -> String {
         // output, so the previous 8-word sentence made the box wider than
         // necessary. The exit-code line above already conveys success vs
         // failure, so "ok" is the smallest meaningful token here.
-        if exit_code.filter(|c| *c != 0).is_some() {
-            format!("(empty output, exit code: {})", exit_code.unwrap_or(0))
-        } else {
-            "ok".to_string()
+        match exit_code {
+            // Signalled death: `code()` is `None`. Never report this as ok.
+            None => "(empty output, terminated by signal — treat as FAILED)".to_string(),
+            Some(0) => "ok".to_string(),
+            Some(code) => format!("(empty output, exit code: {code})"),
         }
     } else {
         output
@@ -707,7 +770,8 @@ fn format_command_output(mut output: String, exit_code: Option<i32>) -> String {
 mod utf8_truncation_tests {
     #[cfg(any(windows, unix))]
     use super::build_shell_command;
-    use super::{BashTool, Tool, ToolContext, format_command_output};
+    use super::{BashTool, Tool, ToolContext, format_command_output, read_stream_capped};
+    use super::{MAX_CAPTURED_STREAM_BYTES, MAX_OUTPUT_LEN};
     use serde_json::json;
 
     #[cfg(windows)]
@@ -755,6 +819,56 @@ mod utf8_truncation_tests {
             "expected truncation marker in: {output:?}"
         );
         assert!(output.starts_with(&"a".repeat(29_999)));
+    }
+
+    /// The capture cap is the whole point of `read_stream_capped`: output past
+    /// it can never reach the model, so it must not be retained.
+    #[tokio::test]
+    async fn read_stream_capped_keeps_only_the_prefix() {
+        let payload = "x".repeat(64 * 1024);
+        let mut reader = std::io::Cursor::new(payload.into_bytes());
+        let captured = read_stream_capped(&mut reader, 1024).await;
+        assert_eq!(captured.len(), 1024);
+        assert_eq!(captured, "x".repeat(1024));
+    }
+
+    /// Draining past the cap is what stops a chatty child from blocking forever
+    /// on a full pipe. If the reader stopped early, the remaining bytes would
+    /// still be sitting in the buffer, so assert they were consumed.
+    #[tokio::test]
+    async fn read_stream_capped_drains_past_the_cap() {
+        let payload = "y".repeat(200 * 1024);
+        let mut reader = std::io::Cursor::new(payload.into_bytes());
+        let captured = read_stream_capped(&mut reader, 4096).await;
+        assert_eq!(captured.len(), 4096);
+        assert_eq!(
+            reader.position(),
+            200 * 1024,
+            "reader must reach EOF so the child is never blocked on a full pipe"
+        );
+    }
+
+    /// A cap that lands mid-sequence must not drop the whole captured prefix
+    /// (which is what an `InvalidData` error from `read_to_string` would do).
+    #[tokio::test]
+    async fn read_stream_capped_survives_a_split_multibyte_sequence() {
+        // "é" is two bytes; a cap of 3 splits the second character.
+        let payload = "aéé".as_bytes().to_vec();
+        let mut reader = std::io::Cursor::new(payload);
+        let captured = read_stream_capped(&mut reader, 3).await;
+        assert!(captured.starts_with('a'));
+        assert!(
+            captured.chars().any(|c| c == 'é'),
+            "expected the complete leading character to survive: {captured:?}"
+        );
+    }
+
+    /// The foreground and detached paths must agree, and the cap must be above
+    /// the post-filter truncation point so `smart_stream` still sees enough
+    /// input to make the same decisions it used to.
+    #[test]
+    fn capture_cap_stays_above_the_output_truncation_point() {
+        const { assert!(MAX_CAPTURED_STREAM_BYTES > MAX_OUTPUT_LEN) };
     }
 
     #[cfg(windows)]
@@ -908,17 +1022,11 @@ impl Tool for BashTool {
                     .iter()
                     .find_map(|k| obj.get(*k).and_then(|v| v.as_str()))
                     .ok_or_else(|| {
-                        let mut keys: Vec<&String> = obj.keys().collect();
-                        keys.sort();
-                        let keys = keys
-                            .iter()
-                            .map(|k| format!("`{k}`"))
-                            .collect::<Vec<_>>()
-                            .join(", ");
                         anyhow::anyhow!(
-                            "missing field `command`. Received keys: {keys}. \
+                            "missing field `command`. {}. \
                              Provide the shell command as `command`, e.g. \
-                             {{\"command\": \"ls -la\"}}"
+                             {{\"command\": \"ls -la\"}}",
+                            super::describe_received_arguments(&input)
                         )
                     })?;
                 let mut value = input.clone();
@@ -972,8 +1080,28 @@ impl Tool for BashTool {
             }
         }
 
+        // Shell-URL safety scan. Not a block: a command may legitimately need
+        // `&` or `|`. But a URL with shell metacharacters in its query string
+        // inside a `findstr`/`powershell` chain is almost always silently
+        // mangled by cmd.exe, and the model then interprets the resulting
+        // garbage. This module was written for exactly that case and never
+        // called, so the warning was never produced.
+        let shell_url_warning =
+            match crate::alphacode_command_risk::scan_for_shell_url_issues(&params.command) {
+                crate::alphacode_command_risk::ShellUrlSafety::Clean => None,
+                crate::alphacode_command_risk::ShellUrlSafety::Warning(w) => Some(w),
+            };
+
         // Foreground execution with stdin detection
-        self.execute_foreground(&params, &ctx).await
+        let result = self.execute_foreground(&params, &ctx).await;
+
+        if let Some(warning) = shell_url_warning
+            && let Ok(mut out) = result
+        {
+            out.output = format!("[shell URL safety] {warning}\n\n{}", out.output);
+            return Ok(out);
+        }
+        result
     }
 }
 
@@ -1033,7 +1161,7 @@ impl BashTool {
                 let stdout_task = tokio::spawn(async move {
                     let mut buf = String::new();
                     if let Some(mut out) = stdout_handle {
-                        let _ = out.read_to_string(&mut buf).await;
+                        buf = read_stream_capped(&mut out, MAX_CAPTURED_STREAM_BYTES).await;
                     }
                     buf
                 });
@@ -1041,7 +1169,7 @@ impl BashTool {
                 let stderr_task = tokio::spawn(async move {
                     let mut buf = String::new();
                     if let Some(mut err) = stderr_handle {
-                        let _ = err.read_to_string(&mut buf).await;
+                        buf = read_stream_capped(&mut err, MAX_CAPTURED_STREAM_BYTES).await;
                     }
                     buf
                 });
@@ -1235,9 +1363,18 @@ impl BashTool {
 
         loop {
             if let Some(status) = child.try_wait()? {
-                let output = tokio::fs::read_to_string(&info.output_file)
-                    .await
-                    .unwrap_or_default();
+                // Cap the read for the same reason as the foreground path: the
+                // file can hold arbitrarily much output from a command that ran
+                // for the whole timeout, and `format_command_output` truncates
+                // the head anyway.
+                let mut captured = String::new();
+                match tokio::fs::File::open(&info.output_file).await {
+                    Ok(mut file) => {
+                        captured = read_stream_capped(&mut file, MAX_CAPTURED_STREAM_BYTES).await;
+                    }
+                    Err(_) => {}
+                }
+                let output = captured;
                 let _ = tokio::fs::remove_file(&info.output_file).await;
                 let _ = tokio::fs::remove_file(&info.status_file).await;
                 return Ok(
@@ -1427,6 +1564,28 @@ impl BashTool {
 	                                }
 	                                #[cfg(not(unix))]
 	                                {
+	                                    // `child` is the *shell* (Git Bash, or
+	                                    // cmd.exe on the fallback path), not the
+	                                    // command the model actually launched.
+	                                    // `start_kill` terminates only that one
+	                                    // process, so the compilers, test runners
+	                                    // and dev servers it spawned are reparented
+	                                    // and keep running indefinitely while still
+	                                    // holding the output file open.
+	                                    // `platform.rs` documents exactly this
+	                                    // hazard and exists to solve it with
+	                                    // taskkill's /T tree walk, but it was
+	                                    // never called on this path while the Unix
+	                                    // branch two lines up does use it. The
+	                                    // `ProcessGroupKillGuard` at the spawn site
+	                                    // is #[cfg(unix)]-only, so Windows had no
+	                                    // equivalent at all.
+	                                    if let Some(pid) = child.id() {
+	                                        let _ =
+	                                            crate::platform::signal_detached_process_group(pid, 0);
+	                                    }
+	                                    // Reap the leader directly in case taskkill
+	                                    // was unavailable or failed.
 	                                    let _ = child.start_kill();
 	                                }
 	                                break;

@@ -1,5 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput};
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -46,16 +46,16 @@ impl Tool for FfufTool {
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["url"],
+            "required": ["url", "wordlist"],
             "properties": {
                 "intent": super::intent_schema_property(),
                 "url": {
                     "type": "string",
-                    "description": "Target URL with FUZZ placeholder (e.g., 'https://target/FUZZ')."
+                    "description": "Target URL with a FUZZ placeholder (e.g., 'https://target/FUZZ')."
                 },
                 "wordlist": {
                     "type": "string",
-                    "description": "Path to wordlist file. Default: common.txt."
+                    "description": "Required. Path to a wordlist file, one entry per line. ffuf ships no wordlist of its own, so this must point at a real file."
                 },
                 "extensions": {
                     "type": "string",
@@ -96,32 +96,60 @@ impl Tool for FfufTool {
 
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: FfufInput = serde_json::from_value(input)?;
-        let args = build_args(&params);
+        let args = build_args(&params)?;
 
-        let output = tokio::process::Command::new("ffuf")
-            .args(&args)
-            .output()
-            .await
-            .with_context(|| {
-                "ffuf not found. Install it: go install github.com/ffuf/ffuf/v2@latest".to_string()
-            })?;
+        let output = super::recon_common::run_bounded(
+            "ffuf",
+            &args,
+            super::recon_common::DEFAULT_TOOL_TIMEOUT,
+        )
+        .await
+        .map_err(|e| {
+            if e.starts_with("failed to run") {
+                anyhow::anyhow!("{e}. {}", super::recon_common::install_hint("ffuf"))
+            } else {
+                anyhow::anyhow!("{e}")
+            }
+        })?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("ffuf exited with error: {stderr}"));
+            return Err(anyhow::anyhow!(
+                "{}",
+                super::recon_common::describe_failure("ffuf", &output)
+            ));
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        // Parse the results instead of handing raw stdout to the model. ffuf
+        // prints a banner and a `\r` progress redraw alongside results, so the
+        // previous behaviour fed all of that to the model verbatim and, unlike
+        // every sibling tool, reported no `count` — so a caller could not tell
+        // an empty scan from a truncated one.
+        let (lines, total, truncated) = super::recon_common::parse_lines(&output.stdout);
+
+        let mut result = format!("ffuf found {total} results for {}:\n\n", params.url);
+        for line in &lines {
+            result.push_str(line);
+            result.push('\n');
+        }
+        result.push_str(&super::recon_common::truncation_notice(lines.len(), total));
+        if total == 0 {
+            result.push_str(
+                "\n[no matches. If the wordlist is small or the filter is strict, this may be a true negative — confirm the target responds at the base URL before concluding there is nothing there.]",
+            );
+        }
 
         let mut metadata = HashMap::new();
         metadata.insert("url".to_string(), json!(params.url));
+        metadata.insert("count".to_string(), json!(lines.len()));
+        metadata.insert("total_found".to_string(), json!(total));
+        metadata.insert("truncated".to_string(), json!(truncated));
         metadata.insert(
             "thread_count".to_string(),
             json!(params.threads.unwrap_or(DEFAULT_THREADS)),
         );
 
-        Ok(ToolOutput::new(stdout)
-            .with_title(format!("ffuf: fuzzing {}", params.url))
+        Ok(ToolOutput::new(result)
+            .with_title(format!("ffuf: {total} results"))
             .with_metadata(json!(metadata)))
     }
 }
@@ -132,17 +160,37 @@ impl FfufTool {
     }
 }
 
-fn build_args(params: &FfufInput) -> Vec<String> {
+fn build_args(params: &FfufInput) -> Result<Vec<String>> {
+    let url = super::recon_common::validate_target(&params.url)?;
+    if !url.contains("FUZZ") {
+        return Err(anyhow::anyhow!(
+            "ffuf needs a `FUZZ` placeholder in the URL, e.g. \
+             `https://example.com/FUZZ`. Got `{url}`."
+        ));
+    }
+
     let mut args = Vec::new();
     args.push("-u".to_string());
-    args.push(params.url.clone());
+    args.push(url);
 
-    if let Some(ref wordlist) = params.wordlist {
-        args.push("-w".to_string());
-        args.push(wordlist.clone());
-    } else {
-        args.push("-w".to_string());
-        args.push("common.txt".to_string());
+    // A wordlist is mandatory; the previous default of the bare relative path
+    // `common.txt` does not exist in the agent's working directory, so the
+    // *default* call always failed. Fail with an actionable message instead of
+    // pointing at a file that was never there.
+    match params.wordlist.as_deref() {
+        Some(wordlist) => {
+            args.push("-w".to_string());
+            args.push(super::recon_common::validate_file_arg(
+                wordlist, "wordlist",
+            )?);
+        }
+        None => {
+            return Err(anyhow::anyhow!(
+                "ffuf requires a `wordlist` path. Pass one explicitly, e.g. \
+                 {{\"url\": \"https://example.com/FUZZ\", \"wordlist\": \"common.txt\"}}. \
+                 ffuf ships no wordlist of its own."
+            ));
+        }
     }
 
     if let Some(ref ext) = params.extensions {
@@ -186,7 +234,7 @@ fn build_args(params: &FfufInput) -> Vec<String> {
         args.push("-nc".to_string());
     }
 
-    args
+    Ok(args)
 }
 
 #[cfg(test)]
@@ -195,6 +243,31 @@ mod tests {
 
     #[test]
     fn test_build_args_basic() {
+        let input = FfufInput {
+            url: "https://example.com/FUZZ".to_string(),
+            wordlist: Some("common.txt".to_string()),
+            extensions: None,
+            threads: None,
+            timeout: None,
+            rate_limit: None,
+            method: None,
+            data: None,
+            headers: None,
+            no_color: false,
+        };
+        let args = build_args(&input).expect("build_args");
+        assert!(args.contains(&"-u".to_string()));
+        assert!(args.contains(&"https://example.com/FUZZ".to_string()));
+        assert!(args.contains(&"-w".to_string()));
+        assert!(args.contains(&"common.txt".to_string()));
+    }
+
+    /// Regression: the old builder defaulted to the bare relative path
+    /// `common.txt`, which does not exist in the agent's working directory,
+    /// so the *default* ffuf call always failed. The wordlist is now
+    /// mandatory and the failure is actionable.
+    #[test]
+    fn missing_wordlist_is_an_actionable_error() {
         let input = FfufInput {
             url: "https://example.com/FUZZ".to_string(),
             wordlist: None,
@@ -207,10 +280,28 @@ mod tests {
             headers: None,
             no_color: false,
         };
-        let args = build_args(&input);
-        assert!(args.contains(&"-u".to_string()));
-        assert!(args.contains(&"https://example.com/FUZZ".to_string()));
-        assert!(args.contains(&"-w".to_string()));
-        assert!(args.contains(&"common.txt".to_string()));
+        let err = build_args(&input).expect_err("must require a wordlist");
+        assert!(
+            err.to_string().contains("wordlist"),
+            "error should name the missing parameter: {err}"
+        );
+    }
+
+    /// ffuf needs a `FUZZ` placeholder; without it the run is meaningless.
+    #[test]
+    fn url_without_fuzz_placeholder_is_rejected() {
+        let input = FfufInput {
+            url: "https://example.com/admin".to_string(),
+            wordlist: Some("common.txt".to_string()),
+            extensions: None,
+            threads: None,
+            timeout: None,
+            rate_limit: None,
+            method: None,
+            data: None,
+            headers: None,
+            no_color: false,
+        };
+        assert!(build_args(&input).is_err());
     }
 }
