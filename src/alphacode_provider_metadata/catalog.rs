@@ -444,6 +444,13 @@ pub const ALPHAX_FREE_BUNDLED_API_KEY: &str = "";
 /// Curated order of Alphax Free models. The post-login flagship picker
 /// consults this list to rank free models above the live catalog's first
 /// random row. Top-down = picker top-down.
+///
+/// This is the *flagship ranking* list, answering only "which model should be
+/// selected on login" — hence a single entry, with `kilo-auto/free` leading as
+/// the gateway's own routing alias. The wider set the agent may rotate through
+/// after a 429 is a different question and lives in
+/// [`crate::alphacode_provider_metadata::CURATED_FREE_MODELS`]; adding models
+/// there must not change which model a fresh login selects.
 pub const ALL_ALPHAX_FREE_MODELS: &[&str] = &["kilo-auto/free"];
 
 pub const ALPHAX_FREE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {

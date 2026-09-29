@@ -1,16 +1,23 @@
 mod agentgrep;
+mod amass;
 pub mod ambient;
+mod anew;
 mod apply_patch;
+mod assetfinder;
 mod bash;
 mod batch;
 mod bg;
 mod browser;
+mod cariddi;
 mod clipboard;
 mod communicate;
 #[cfg(target_os = "macos")]
 mod computer;
 mod conversation_search;
+mod corsy;
+mod crlfuzz;
 mod cron;
+mod dalfox;
 mod debug_socket;
 pub mod desktop;
 pub(crate) mod diff_utils;
@@ -18,23 +25,37 @@ mod discover;
 mod dnsx;
 mod doctor;
 mod edit;
+mod feroxbuster;
 mod ffuf;
 mod gau;
+mod gf;
 mod gmail;
 mod goal;
+mod gobuster;
+mod gospider;
+mod hakrawler;
 mod httpflow;
+mod httprobe;
 mod httpx;
 mod invalid;
 mod jwt;
 mod katana;
+mod kxss;
 mod ls;
 pub mod mcp;
+mod meg;
 mod memory;
 mod multiedit;
+mod naabu;
+mod nikto;
+mod nmap;
+mod nuclei;
 mod open;
 mod patch;
 mod plan;
+mod qsreplace;
 mod read;
+pub mod recon_common;
 mod repeat_guard;
 mod scrapling;
 mod self_improve;
@@ -44,8 +65,10 @@ mod session_search;
 pub(crate) mod session_search_index;
 mod side_panel;
 mod skill;
+mod sqlmap;
 mod subfinder;
 mod todo;
+mod unfurl;
 mod waybackurls;
 mod webfetch;
 mod websearch;
@@ -130,6 +153,173 @@ pub(crate) fn is_input_validation_error(error: &anyhow::Error) -> bool {
         || message.contains("requires a non-empty")
         || message.contains("unsupported browser action")
         || message.contains("unknown action")
+}
+
+/// Describe what a malformed tool call actually contained, for the
+/// "missing field X" family of errors.
+///
+/// This used to be copy-pasted into five tools, and every copy rendered
+/// `Received keys: .` for the *most common* malformed call — an empty object,
+/// which is exactly what a model emits when it calls a tool with no arguments
+/// at all (or when argument streaming was truncated). That sentence gives the
+/// model nothing to act on, so it repeated the same broken call until the
+/// repeat guard blocked it.
+///
+/// The three cases are worth distinguishing because they need different fixes:
+/// - no arguments at all -> "call the tool again with its required fields"
+/// - wrong JSON type -> "arguments must be a JSON object"
+/// - right shape, wrong key -> list the keys so the model can see the typo
+pub(crate) fn describe_received_arguments(input: &Value) -> String {
+    match input {
+        Value::Object(map) if map.is_empty() => {
+            "The call carried no arguments at all (an empty JSON object). \
+             Re-issue it with the tool's required fields filled in."
+                .to_string()
+        }
+        Value::Object(map) => {
+            let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            let listed = keys
+                .iter()
+                .map(|key| format!("`{key}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "Received keys: {listed}. Match those names to the tool's \
+                 required fields, or re-check the schema for the exact spelling."
+            )
+        }
+        Value::Null => {
+            "The call carried no arguments (null). Re-issue it with the required fields."
+                .to_string()
+        }
+        other => format!(
+            "Expected a JSON object of arguments, got {}. \
+             Re-issue the call as a single JSON object with the required fields.",
+            json_type_name(other)
+        ),
+    }
+}
+
+/// Human-readable JSON type name for an error message.
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
+/// Always-on prompt budget for one tool description, in estimated tokens.
+///
+/// Shared with `tool_descriptions_stay_under_token_cap` so the generator and
+/// its guard can never drift apart. Tool descriptions are sent on every
+/// request, so this is a hard budget, not a guideline.
+pub(crate) const TOOL_DESCRIPTION_TOKEN_CAP: usize = 250;
+
+/// One short sentence naming a tool's mandatory arguments, for appending to
+/// its description.
+///
+/// Returns `None` when the tool declares no required fields, when the
+/// description already names every field, or — importantly — when appending
+/// would push the description over [`TOOL_DESCRIPTION_TOKEN_CAP`]. The budget
+/// wins: a tool whose own guidance already fills the cap gets the schema's
+/// `required` array (which every provider honours to some degree) but no
+/// extra prose.
+fn required_argument_contract(schema: &Value, description: &str) -> Option<String> {
+    let required = schema.get("required")?.as_array()?;
+    if required.is_empty() {
+        return None;
+    }
+    let mut names = Vec::with_capacity(required.len());
+    for name in required {
+        names.push(name.as_str()?);
+    }
+
+    // If the prose already spells every field out, adding it again is noise.
+    if names.iter().all(|name| description.contains(name)) {
+        return None;
+    }
+
+    let listed = names
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sentence = format!(" Required: {listed}.");
+
+    let projected =
+        crate::util::estimate_tokens(description) + crate::util::estimate_tokens(&sentence);
+    if projected > TOOL_DESCRIPTION_TOKEN_CAP {
+        return None;
+    }
+    Some(sentence)
+}
+
+/// Build a "here is how to call this tool" line from the tool's own schema.
+///
+/// Nearly every tool deserializes its input with a bare
+/// `serde_json::from_value`, so a malformed call surfaces as a raw serde
+/// complaint ("missing field `file_path`") that names one field at a time and
+/// never shows the model the other required ones. Models then retry field by
+/// field, one failure per attempt. Reading the required set straight from the
+/// schema means the *first* error can state the whole contract, and it stays
+/// correct automatically as schemas change.
+pub(crate) fn schema_call_hint(schema: &Value) -> Option<String> {
+    let properties = schema.get("properties")?.as_object()?;
+    let required = schema.get("required")?.as_array()?;
+
+    let mut parts = Vec::new();
+    for name in required {
+        let name = name.as_str()?;
+        let spec = properties.get(name);
+        let kind = spec
+            .and_then(|spec| spec.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("string");
+        let sample = sample_for_kind(kind);
+        parts.push(format!("{name}: {sample}"));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Required arguments: {}. Example: {}",
+        parts.join(", "),
+        render_example(parts)
+    ))
+}
+
+/// A short, obviously-fake placeholder for a JSON type.
+fn sample_for_kind(kind: &str) -> &'static str {
+    match kind {
+        "integer" | "number" => "0",
+        "boolean" => "false",
+        "array" => "[]",
+        "object" => "{}",
+        _ => "\"...\"",
+    }
+}
+
+/// Render the required-argument list back into a JSON object literal, quoting
+/// the field names so the model can copy the shape exactly.
+fn render_example(parts: Vec<String>) -> String {
+    let mut out = String::from("{");
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        let (name, value) = part.split_once(": ").unwrap_or((part.as_str(), "\"...\""));
+        out.push('"');
+        out.push_str(name.trim());
+        out.push_str("\": ");
+        out.push_str(value);
+    }
+    out.push('}');
+    out
 }
 
 pub(crate) fn agent_facing_error(tool_name: &str, error: &anyhow::Error) -> String {
@@ -383,6 +573,63 @@ impl Registry {
             Self::insert_tool_timed(&mut m, &mut timings, "katana", katana::KatanaTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "ffuf", ffuf::FfufTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "dnsx", dnsx::DnsxTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "nuclei", nuclei::NucleiTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "naabu", naabu::NaabuTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "amass", amass::AmassTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "assetfinder",
+                assetfinder::AssetfinderTool::new,
+            );
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "gobuster",
+                gobuster::GobusterTool::new,
+            );
+            Self::insert_tool_timed(&mut m, &mut timings, "sqlmap", sqlmap::SqlmapTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "nmap", nmap::NmapTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "nikto", nikto::NiktoTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "unfurl", unfurl::UnfurlTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "meg", meg::MegTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "gf", gf::GfTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "feroxbuster",
+                feroxbuster::FeroxbusterTool::new,
+            );
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "hakrawler",
+                hakrawler::HakrawlerTool::new,
+            );
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "gospider",
+                gospider::GospiderTool::new,
+            );
+            Self::insert_tool_timed(&mut m, &mut timings, "dalfox", dalfox::DalfoxTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "kxss", kxss::KxssTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "corsy", corsy::CorsyTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "crlfuzz", crlfuzz::CrlfuzzTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "cariddi", cariddi::CariddiTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "httprobe",
+                httprobe::HttprobeTool::new,
+            );
+            Self::insert_tool_timed(&mut m, &mut timings, "anew", anew::AnewTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "qsreplace",
+                qsreplace::QsreplaceTool::new,
+            );
             Self::insert_tool_timed(&mut m, &mut timings, "jwt", || jwt::JwtTool);
             Self::insert_tool_timed(&mut m, &mut timings, "invalid", invalid::InvalidTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "todo", todo::TodoTool::new);
@@ -518,6 +765,17 @@ impl Registry {
                 // just the raw tool name)
                 if def.name != *name {
                     def.name = name.clone();
+                }
+                // State the mandatory arguments in prose as well as in the
+                // JSON schema's `required` array. Providers and models vary in
+                // how much weight they give `required`, and a call that omits a
+                // mandatory field is the single most common tool error — it
+                // costs a full round-trip to discover. Deriving this from each
+                // tool's own schema keeps it correct with zero per-tool upkeep.
+                if let Some(contract) =
+                    required_argument_contract(&def.input_schema, &def.description)
+                {
+                    def.description.push_str(&contract);
                 }
                 def
             })
@@ -904,22 +1162,11 @@ impl Registry {
             let last_error = repeat_guard::last_error(&ctx.session_id, resolved_name, true, &input)
                 .map(|e| format!("\nLast error: {e}"))
                 .unwrap_or_default();
-            let received_keys = input
-                .as_object()
-                .map(|obj| {
-                    let mut keys: Vec<&String> = obj.keys().collect();
-                    keys.sort();
-                    keys.iter()
-                        .map(|k| format!("`{k}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .map(|keys| format!("\nReceived keys: {keys}"))
-                .unwrap_or_default();
+            let received = describe_received_arguments(&input);
             let msg = format!(
                 "Refusing to run `{resolved_name}` again: this identical call already failed \
                  {prior_failures} times in this session. Repeating it cannot succeed — \
-                 change the arguments or use a different tool.{last_error}{received_keys}"
+                 change the arguments or use a different tool.{last_error}\n{received}"
             );
             crate::logging::warn(&format!(
                 "Repeat-failure guard blocked '{resolved_name}' (prior failures: {prior_failures}) \
@@ -1001,6 +1248,23 @@ impl Registry {
                 fields.push(("elapsed_ms".to_string(), latency_ms.to_string()));
                 fields.push(("error".to_string(), crate::util::format_error_chain(&error)));
                 crate::logging::event_warn("TOOL_LIFECYCLE", fields);
+                // A malformed call is the model's mistake, not a runtime
+                // failure, and almost every tool reports it as a bare serde
+                // "missing field X" that names one field at a time. Append the
+                // tool's real required set (read from its own schema, so it
+                // cannot drift) so one error is enough to fix the whole call
+                // instead of one error per missing field.
+                if is_input_validation_error(&error) {
+                    return Err(anyhow::anyhow!(
+                        "{}\n{}",
+                        error,
+                        schema_call_hint(&tool.parameters_schema()).unwrap_or_else(|| {
+                            format!(
+                                "Check the `{resolved_name}` schema for its required arguments."
+                            )
+                        })
+                    ));
+                }
                 return Err(error);
             }
         };

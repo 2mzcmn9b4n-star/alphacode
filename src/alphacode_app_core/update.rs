@@ -257,11 +257,18 @@ fn verify_asset_checksum_if_available(
     bytes: &[u8],
 ) -> Result<()> {
     let Some(checksum_asset) = checksum_asset(release) else {
-        crate::logging::info(&format!(
-            "Release {} does not include SHA256SUMS; skipping checksum verification",
+        // Fail closed. A missing SHA256SUMS is reachable with no attacker at
+        // all: in release.yml the archives are uploaded by each `build` job,
+        // while SHA256SUMS is uploaded by a separate `release` job that
+        // `needs: build`. If that job fails, is cancelled, or its
+        // create-release step breaks, the archives are already public and every
+        // client would silently install them unverified. Anyone who can
+        // influence the release response reaches the same downgrade just by
+        // omitting the asset, so its absence must be fatal rather than logged.
+        anyhow::bail!(
+            "Release {} does not publish SHA256SUMS; refusing to install an unverified binary",
             release.tag_name
-        ));
-        return Ok(());
+        );
     };
 
     let response = client
@@ -1046,15 +1053,49 @@ pub fn download_and_install_blocking_with_progress(
             let mut archive = zip::ZipArchive::new(cursor).context("Failed to open zip archive")?;
             for i in 0..archive.len() {
                 let mut entry = archive.by_index(i)?;
-                let entry_name = entry.name().to_string();
-                // Only extract top-level files (no subdirectories)
-                if entry_name.contains('/') || entry_name.contains('\\') {
+                if entry.is_dir() {
                     continue;
                 }
-                if entry_name.is_empty() || entry_name.ends_with(".zip") {
+                // `entry.name()` is the raw stored name with no normalisation;
+                // the `zip` crate documents this and points at
+                // `enclosed_name()` for exactly this reason. The previous
+                // separator filter did reject `../../evil` and `/etc/shadow`,
+                // but an entry named `C:evil.exe` contains no separator at all
+                // and slipped through — and on Windows `extract_dir.join()`
+                // *replaces* the accumulated path when the operand carries a
+                // drive prefix, so that write landed in the process CWD on
+                // drive C:.
+                //
+                // `enclosed_name()` rejects prefix/root components, refuses any
+                // `..` that escapes, and rejects NUL bytes. Requiring exactly
+                // one `Normal` component on top of that preserves the original
+                // "top-level files only, no subdirectories" intent.
+                let Some(rel) = entry.enclosed_name() else {
+                    continue;
+                };
+                let mut components = rel.components();
+                let Some(std::path::Component::Normal(file_name)) = components.next() else {
+                    continue;
+                };
+                if components.next().is_some() {
                     continue;
                 }
-                let dest = extract_dir.join(&entry_name);
+                let Some(file_name) = file_name.to_str() else {
+                    continue;
+                };
+                if file_name.is_empty() || file_name.ends_with(".zip") {
+                    continue;
+                }
+                let dest = extract_dir.join(file_name);
+                // Belt and braces: prove containment after the join and before
+                // creating anything on disk.
+                let base = extract_dir
+                    .canonicalize()
+                    .context("Failed to canonicalize extract dir")?;
+                anyhow::ensure!(
+                    dest.parent() == Some(base.as_path()),
+                    "zip entry {file_name:?} resolved outside the extraction directory"
+                );
                 let mut out_file = fs::File::create(&dest)?;
                 std::io::copy(&mut entry, &mut out_file)?;
             }
@@ -1085,7 +1126,10 @@ pub fn download_and_install_blocking_with_progress(
         };
         crate::platform::set_permissions_executable(&extracted_binary)?;
 
-        let version = release.tag_name.trim_start_matches('v');
+        // `tag_name` comes straight off the releases API. Validate it before it
+        // becomes a path component: see `safe_version_component`.
+        let version_owned = build::safe_version_component(&release.tag_name)?;
+        let version = version_owned.as_str();
         let dest_dir = build::builds_dir()?.join("versions").join(version);
         fs::create_dir_all(&dest_dir).context("Failed to create version install dir")?;
         let mut installed_files = Vec::new();
@@ -1130,7 +1174,8 @@ pub fn download_and_install_blocking_with_progress(
         fs::write(&temp_path, &bytes).context("Failed to write temp file")?;
     }
 
-    let version = release.tag_name.trim_start_matches('v');
+    let version_owned = build::safe_version_component(&release.tag_name)?;
+    let version = version_owned.as_str();
     let mut metadata = UpdateMetadata::load().unwrap_or_default();
 
     let versioned_path = if let Some(versioned_path) = installed_version_dir {

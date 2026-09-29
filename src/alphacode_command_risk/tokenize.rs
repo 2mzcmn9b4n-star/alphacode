@@ -28,20 +28,50 @@ impl Token {
         }
     }
 
-    /// The command name without its directory, so `/bin/rm` matches `rm`.
+    /// The command name without its directory, so `/bin/rm` and
+    /// `C:\Windows\System32\cmd.exe` both match `rm` / `cmd.exe`.
+    ///
+    /// Splits on both separators: on Windows a fully-qualified program path
+    /// uses `\`, and splitting only on `/` would leave the whole path as the
+    /// "name", so `C:\Windows\System32\cmd.exe /c del ...` would never be
+    /// recognized as a shell invocation.
+    ///
+    /// Lowercased. Every list this feeds (`DESTRUCTIVE_COMMANDS`,
+    /// `SHELL_COMMANDS`, `WRAPPER_COMMANDS`, `CONDITIONALLY_DESTRUCTIVE`) is
+    /// written in lowercase, and the lookup is a plain `contains` on `&str`.
+    /// Windows command resolution is case-insensitive, so without this
+    /// `DeL /f /s /q C:\Users` and `RM -RF ~` matched nothing and classified as
+    /// `Safe`. Downstream path comparison already normalises case separately
+    /// (`normalize_for_compare`), so folding it here does not affect operands.
     pub fn basename(&self) -> String {
         self.text
-            .rsplit('/')
+            .rsplit(['/', '\\'])
             .next()
             .unwrap_or(&self.text)
-            .to_string()
+            .to_ascii_lowercase()
     }
 
+    /// Whether this token is a flag/switch rather than an operand.
+    ///
+    /// Recognises both the POSIX `-x` form and the Windows `/x` form. The
+    /// Windows form matters because otherwise `rd /s /q C:\target` counted
+    /// `/s`, `/f` and `/q` as *targets*: they were expanded against the current
+    /// drive into `\s`, `\f`, `\q` and each produced a spurious
+    /// "outside the working directory" finding, while `is_recursive_flag` — whose
+    /// whole purpose is to catch `rd /s` — never saw them.
     pub fn is_flag(&self) -> bool {
-        self.text.starts_with('-') && self.text.len() > 1
+        if self.text.starts_with('-') && self.text.len() > 1 {
+            return true;
+        }
+        // `/x` or `/X`, but not the bare `/` (a POSIX path separator) and not
+        // `/some/path`.
+        self.text.len() > 1
+            && self.text.starts_with('/')
+            && self.text[1..].chars().all(|c| c.is_ascii_alphabetic())
     }
 
-    /// Whether this flag requests recursion, including bundles like `-rf`.
+    /// Whether this flag requests recursion, including bundles like `-rf` and
+    /// the Windows `/s`.
     pub fn is_recursive_flag(&self) -> bool {
         if !self.is_flag() {
             return false;
@@ -49,12 +79,18 @@ impl Token {
         if self.text.starts_with("--") {
             return self.text == "--recursive";
         }
-        self.text.contains('r') || self.text.contains('R')
+        // `rd /s` and `rm -rf` are the two spellings of the same request.
+        self.text.contains('r') || self.text.contains('R') || self.text.eq_ignore_ascii_case("/s")
     }
 }
 
 /// Characters that separate one command from the next.
-const SEGMENT_SEPARATORS: &[&str] = &["&&", "||", ";", "|", "\n"];
+///
+/// `&` belongs here: it is cmd.exe's and POSIX's "run this after that" operator
+/// and was missing, so `echo hi & del /f /s /q C:\Users\x` was analysed as a
+/// single segment whose program was `echo`. `&&` is a separate token (see the
+/// tokenizer) and still matches its own entry.
+const SEGMENT_SEPARATORS: &[&str] = &["&&", "||", "&", ";", "|", "\n"];
 
 /// Split a command line into individual command segments, each tokenized.
 ///
@@ -145,9 +181,26 @@ pub fn tokenize(command: &str) -> Vec<Token> {
                 }
             }
             '\\' => {
-                if let Some(next) = chars.next() {
-                    has_content = true;
-                    current.push(next);
+                // A backslash is an escape character in POSIX shells, but it is
+                // the *path separator* on Windows. Treating every `\` as an
+                // escape mangled `C:\Windows\System32` into
+                // `C:WindowsSystem32`, so the protected-path check never
+                // matched a Windows path and `rm -rf C:\Windows` sailed
+                // through. Escape only the characters POSIX actually escapes
+                // (mirroring the double-quoted branch above); otherwise keep
+                // the backslash as part of the path.
+                match chars.peek() {
+                    Some(&next) if matches!(next, '"' | '\\' | '$' | '`') => {
+                        has_content = true;
+                        current.push(next);
+                        chars.next();
+                    }
+                    _ => {
+                        if has_content || !current.is_empty() {
+                            has_content = true;
+                        }
+                        current.push('\\');
+                    }
                 }
             }
             ' ' | '\t' => flush!(),

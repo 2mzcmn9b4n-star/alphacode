@@ -9,7 +9,7 @@ description: Structured security runbooks — Predefined workflows for common se
 
 > Bug bounty assessments ALSO follow section 10 (operating rules):
 > scope file, checkpointing, priority order, kill rules, differential
-> testing, chain analysis, output discipline, no-finding checklist.
+> testing, compound-risk notes, output discipline, no-finding checklist.
 
 ---
 
@@ -161,20 +161,26 @@ PHASE 2: VULNERABILITY SCANNING (20 min)
 ├── XSS testing
 └── Output: candidate findings
 
-PHASE 3: EXPLOITATION (30 min)
-├── Verify all candidate findings
-├── Build proof of concept for each
-├── Chain low findings into high
-├── Test for privilege escalation
-├── Test for data exfiltration
-└── Output: verified findings with PoCs
+PHASE 3: VERIFICATION (30 min)
+├── Confirm each candidate against its baseline (expected vs actual)
+├── Rule out intended behavior before calling anything a finding
+├── Build a minimal, non-destructive PoC for each
+├── Check the same boundary for a WRITE path only if read was proven AND
+│   the user asked for depth (note it otherwise — do not test it)
+├── Measure affected scope (how many records/accounts), not just reachability
+└── Output: verified findings with PoCs, or documented rejections
 
-PHASE 4: POST-EXPLOITATION (15 min)
-├── Lateral movement (if applicable)
-├── Persistence testing (if applicable)
-├── Data access scope
-├── Impact demonstration
-└── Output: impact assessment
+PHASE 4: IMPACT ASSESSMENT (15 min)
+├── For each proven finding: who is affected, what data is exposed
+├── CVSS from demonstrated impact — not from a theoretical chain
+├── Record plausible compound risk as an analyst note, untested
+├── Note anything that limited coverage (missing role, blocked path)
+└── Output: severity per finding + honest coverage statement
+
+NEVER: establish persistence, move laterally between accounts or hosts, or
+exfiltrate beyond the minimum needed to prove one boundary. Those are
+destructive and out of scope for a review. If the user explicitly needs
+containment/incident-response work, that is a different engagement.
 
 PHASE 5: REPORTING (15 min)
 ├── Document all findings
@@ -383,6 +389,35 @@ Mandatory for any bug bounty / pentest engagement. These fix the
 recurring failure modes: lost context, wasted tests, scope drift,
 unreadable reports.
 
+### 10.0 Posture: reviewer, not attacker
+
+This governs every skill in this bundle, and it overrides any "chain to
+maximum impact" phrasing you may find in a technique reference.
+
+You are assessing an application for its owner. Concretely:
+
+- **Report the demonstrated severity.** A proven read-only IDOR is not a
+  Critical because write access might exist. Do not price a finding by what a
+  chain *could* reach.
+- **Stop at the point of proof.** Once a boundary crossing is demonstrated,
+  the finding is complete. Escalating further is a scope decision the user
+  must make, not a tactic to run automatically.
+- **Expected behavior is not a vulnerability.** Public content served to any
+  authenticated user, documented defaults, version banners, and error messages
+  are the application working. Most rejected reports die at this gate.
+- **Never act beyond the boundary.** No persistence, no lateral movement, no
+  bulk exfiltration, no lockouts, no data modification, no DoS. Prove with
+  the minimum: a few records, your own test account, one request.
+- **A clean result is a good result.** "Tested these areas, all controls held"
+  is a deliverable. Do not pad a report to look productive.
+- **Explain your reasoning.** State what you expected, what you observed, and
+  why that is (or is not) a vulnerability.
+
+Historical bug-bounty writeups in these skills are **precedent data** — they
+show which bug classes programs accept and how they were described. Read them
+for technique and reporting structure, not as a payout target. A large
+historical payout is not evidence that a similar bug is present or severe here.
+
 ### 10.1 Scope file (see scope skill)
 
 Write it before any testing. Check every new host against it.
@@ -436,16 +471,22 @@ unauthenticated (and role vs role when two identities exist).
 The DIFFERENCE is the finding. Single-sided tests prove nothing
 about authorization.
 
-### 10.6 Chain analysis
+### 10.6 Compound-risk analysis (note it, don't chase it)
 
-After each validated finding ask "what does this enable?" and take
-at most 2 chaining steps before reporting:
+After a validated finding, ask "what could this enable?" — and **write the
+answer down; don't test it**. Record plausible follow-on risk as an analyst
+note so the owner can prioritize, then stop:
 
 ```
-IDOR read → other users' data? → privilege escalation? → admin ops?
-Info disclosure → secrets? → auth bypass? → config read?
-Open redirect → + XSS → convincing phishing?
+IDOR read            → note: write access on the same endpoint may exist
+Info disclosure      → note: leaked config could weaken auth
+Open redirect        → note: on a trusted origin this aids phishing
 ```
+
+Escalating past a proven finding is a scope decision, not a hunting tactic.
+Only continue when the user explicitly asks for deeper impact **and** the
+scope file permits it. Severity is always the impact you actually
+demonstrated — a chain you only describe never raises it.
 
 ### 10.7 Output discipline
 

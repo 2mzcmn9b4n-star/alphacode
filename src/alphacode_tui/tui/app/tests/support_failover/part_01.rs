@@ -281,7 +281,13 @@ fn debug_memory_profile_includes_app_owned_summary_for_large_client_state() {
             anchor: None,
         });
     app.observe_page_markdown = "# observe\n".repeat(256);
-    app.input_undo_stack.push(("draft ".repeat(256), 12));
+    // Seed a large draft through the real undo path rather than pushing onto the
+    // stack directly: the byte total is now maintained incrementally by
+    // `remember_input_undo_state`, so a direct `push` would leave the counter at
+    // zero and the accounting below would be vacuous.
+    app.input = "draft ".repeat(256);
+    app.cursor_pos = app.input.len();
+    app.remember_input_undo_state();
 
     let profile = app.debug_memory_profile();
     let app_owned = &profile["app_owned"];

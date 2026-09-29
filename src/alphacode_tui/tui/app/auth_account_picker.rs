@@ -425,7 +425,7 @@ impl App {
             "all" => self.build_all_inline_account_picker(),
             "claude" => self.build_claude_inline_account_picker(),
             "openai" => self.build_openai_inline_account_picker(),
-            _ => unreachable!(),
+            _ => self.build_all_inline_account_picker(),
         };
 
         self.inline_view_state = None;

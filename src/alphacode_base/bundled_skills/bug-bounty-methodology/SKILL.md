@@ -1,14 +1,14 @@
 ---
 name: bug-bounty-methodology
-description: "Real-world bug bounty methodology with program-specific workflows, time management, and earning optimization. Structured for maximum validated findings/hour."
+description: "Real-world security assessment methodology with program-specific workflows, time management, and reporting discipline. Structured for accurate validated findings and honest coverage."
 ---
 
 # Bug Bounty Methodology — Real World
 
 ## Time Budget Per Program
 ```
-Day 1: Recon + Map (2h) → first findings
-Day 2: Deep hunt (4h) → chain building
+Day 1: Recon + Map (2h) → first verified findings (or a clean result)
+Day 2: Deep assessment (4h) → verification
 Day 3: Report + cleanup (2h) → submit
 Total: 8h per program rotation
 ```
@@ -18,16 +18,16 @@ Total: 8h per program rotation
 ```bash
 # Find programs with recent activity
 # HackerOne: sort by last report date
-# Bugcrowd: filter by "must have" and recent payout
+# Bugcrowd: filter by "must have" and recent reports
 # Intigriti: filter by "priority" programs
-# Immunefi: DeFi programs (highest payouts)
+# Immunefi: DeFi programs
 
 # Key selection criteria:
-# 1. Payout range: $500+ minimum
+# 1. Scope: *.target.com (wide) vs specific endpoints (narrow)
 # 2. Recent reports (<30 days) = program active
-# 3. Scope: *.target.com (wide) vs specific endpoints (narrow)
-# 4. Response time: <24h = good, >7d = avoid
-# 5. Duplicate rate: <30% = good opportunity
+# 3. Response time: <24h = good, >7d = slow to triage
+# 4. Duplicate rate: <30% = less crowded
+# 5. Clear rules on safe-harbor and prohibited actions
 ```
 
 ## Phase 2: Recon (30 min)
@@ -98,31 +98,43 @@ PRIORITY 3:
 # Attack:    20x parallel → should still be 1 success
 ```
 
-## Phase 5: Chain Building
+## Phase 5: Compound-Risk Notes (record, don't chase)
+
+Once a boundary crossing is proven, the review of that finding is **done**.
+Write down what it *could* enable, and stop:
 
 ```
-LOW → HIGH value chains:
-- IDOR read → IDOR write → ATO                    ($1K → $50K)
-- SSRF → cloud metadata → IAM keys → RCE           ($500 → $500K)
-- Open redirect → OAuth abuse → ATO                 ($200 → $50K)
-- XSS → admin cookie → privilege escalation         ($500 → $50K)
-- Rate limit bypass → OTP brute → ATO               ($1K → $10K)
-- CRLF → cookie injection → session hijack          ($500 → $10K)
-- Cache poisoning → account takeover                ($1K → $25K)
+IDOR read         → note: a write path on the same endpoint would be worse
+SSRF              → note: cloud metadata reachable from this egress?
+Open redirect     → note: on a trusted origin this aids phishing
+XSS               → note: same-origin content could raise the impact
+CRLF              → note: cookie injection would change severity
 ```
+
+Two hard rules:
+- **Do not execute the chain** to raise a finding's severity. That is a scope
+  decision for the user, not a tactic.
+- **Report the demonstrated impact**, not the compounded one. A read-only
+  IDOR is not a Critical because account takeover might follow.
 
 ## Phase 6: 7-Gate Validation
 
 ```
 G1: IN SCOPE? → Check program scope definition
 G2: BOUNDARY CROSSED? → Authz/authn boundary
-G3: ATTACKER PERSPECTIVE? → Unauth'd or low-priv
+G3: ACTOR PERSPECTIVE? → Unauth'd or low-priv
 G4: REPRODUCIBLE? → Works every time
-G5: IMPACT? → Data access, ATO, RCE, financial
+G5: IMPACT? → Data access, ATO, RCE, financial — demonstrated, not asserted
 G6: NO FALSE POSITIVE? → Not a known acceptable behavior
 G7: PROGRAM ACCEPTS? → Not explicitly excluded
 FAIL ANY → DO NOT REPORT
 ```
+
+### Gate 2 — boundary or feature?
+Ask whether the resource was *meant* to be reachable by that actor. Public
+content served to any authenticated user, documented defaults, and
+already-public data are the feature working. This gate rejects more findings
+than all the others combined — check it first.
 
 ### Gate 6 — Common False Positives (Don't Report)
 - CORS `*` without credentialed data access
@@ -132,6 +144,7 @@ FAIL ANY → DO NOT REPORT
 - Version disclosure without known CVE
 - Clickjacking on non-sensitive pages
 - SSL/TLS configuration issues
+- Publicly available data shown to a logged-in user
 
 ## Phase 7: Report
 
@@ -145,10 +158,13 @@ Steps to Reproduce:
 2. [Copy-paste HTTP requests]
 3. [Screenshots/videos if needed]
 
-Impact: [N users affected, data type, $ amount, CVSS score]
+Impact: [who is affected, what data is exposed, CVSS score]
 
 Fix: [1-2 sentences — concrete remediation]
 ```
+
+A "no vulnerabilities found" report is a valid, valuable deliverable. State
+what you covered and what you did not.
 
 ## Real Program Workflows
 

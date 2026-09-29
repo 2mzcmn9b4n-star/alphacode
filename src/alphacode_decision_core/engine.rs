@@ -221,8 +221,11 @@ impl DecisionEngine {
                 && (entry.inserted_at.elapsed().as_secs() < self.config.cache_ttl_secs
                     || self.config.cache_ttl_secs == 0)
             {
-                self.stats.lock().unwrap().cache_hits += 1;
-                self.stats.lock().unwrap().total_requests += 1;
+                {
+                    let mut stats = self.stats.lock().unwrap();
+                    stats.cache_hits += 1;
+                    stats.total_requests += 1;
+                }
                 return Ok(entry.result.clone());
             }
         }
@@ -240,8 +243,11 @@ impl DecisionEngine {
             Ok(r) => r,
             Err(e) => {
                 if self.config.fallback_enabled {
-                    self.stats.lock().unwrap().fallback_used += 1;
-                    self.stats.lock().unwrap().errors += 1;
+                    {
+                        let mut stats = self.stats.lock().unwrap();
+                        stats.fallback_used += 1;
+                        stats.errors += 1;
+                    }
                     let dummy = serde_json::json!({});
                     DecisionResult::Probability(
                         self.fallback.decide_probability(question, &dummy).await?,
@@ -277,8 +283,11 @@ impl DecisionEngine {
                 && (entry.inserted_at.elapsed().as_secs() < self.config.cache_ttl_secs
                     || self.config.cache_ttl_secs == 0)
             {
-                self.stats.lock().unwrap().cache_hits += 1;
-                self.stats.lock().unwrap().total_requests += 1;
+                {
+                    let mut stats = self.stats.lock().unwrap();
+                    stats.cache_hits += 1;
+                    stats.total_requests += 1;
+                }
                 return Ok(entry.result.clone());
             }
         }
@@ -331,8 +340,11 @@ impl DecisionEngine {
                 && (entry.inserted_at.elapsed().as_secs() < self.config.cache_ttl_secs
                     || self.config.cache_ttl_secs == 0)
             {
-                self.stats.lock().unwrap().cache_hits += 1;
-                self.stats.lock().unwrap().total_requests += 1;
+                {
+                    let mut stats = self.stats.lock().unwrap();
+                    stats.cache_hits += 1;
+                    stats.total_requests += 1;
+                }
                 return Ok(entry.result.clone());
             }
         }

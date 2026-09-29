@@ -46,6 +46,11 @@ bash arrays, `&>/dev/null`, `((missing++))`). It FAILS on Windows
 
 ## 1. TOOL READINESS CHECK
 
+**Run `alphacode bugbounty doctor` first.** It is cross-platform, read-only,
+and resolves the Go bin directory and Windows `PATHEXT` correctly. Use the bash
+script below only when that command is unavailable or when you need the
+extended tool list it covers.
+
 Run this to see what's available on the current machine:
 
 ```bash
@@ -211,6 +216,63 @@ Track tool status for your engagement:
 ---
 
 ## 3. TOOL INSTALLATION
+
+### PREFERRED: built-in `alphacode bugbounty` (no shell script required)
+
+This is the fastest and most reliable path. It resolves install commands per
+platform, verifies the package manager it needs, reports exactly which tool
+ended up on `PATH`, and handles the Go bin-directory problem that makes
+`go install` look like it failed when it succeeded.
+
+```bash
+# What is present / missing, with the install command for each
+alphacode bugbounty doctor
+
+# JSON for scripting
+alphacode bugbounty doctor --json
+
+# What can be installed automatically
+alphacode bugbounty list
+
+# Preview without changing anything
+alphacode bugbounty install subfinder httpx --dry-run
+
+# Install the default pipeline
+# (subfinder httpx dnsx katana gau waybackurls ffuf nuclei)
+alphacode bugbounty install
+
+# Install specific tools
+alphacode bugbounty install subfinder httpx katana
+
+# Verify an install landed
+alphacode bugbounty doctor
+```
+
+**Go is the one hard prerequisite.** Most of the toolkit is Go-built. If it is
+missing, the doctor says so explicitly — install it first:
+
+```bash
+# Windows
+winget install GoLang.Go
+# macOS
+brew install go
+# Debian/Ubuntu/Kali
+sudo apt install golang-go
+```
+
+Then **reopen your terminal** so `PATH` picks up the new Go, and note that
+`go install` writes to `~/go/bin` (`%USERPROFILE%\go\bin` on Windows), which
+is frequently not on `PATH`. The doctor and installer both check that directory
+and print the exact `export PATH=...` line if it is missing.
+
+**Installation is always explicit.** The agent never installs a binary on its
+own initiative during an engagement — it reports the missing tool and the
+command. Installing third-party binaries is an external-state change, and
+silently doing it mid-scan is not something to do without a human saying yes.
+
+The shell installers below remain valid and cover tools the built-in command
+does not automate (`nikto`, `dirb`, `dalfox`, `trufflehog`, nuclei templates,
+wordlists).
 
 ### One-shot installer (bundled) — all OSes
 

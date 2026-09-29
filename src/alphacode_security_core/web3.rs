@@ -261,7 +261,7 @@ fn mul_div_floor(a: u128, b: u128, d: u128) -> u128 {
     }
     let q = a / d;
     let r = a % d;
-    let hi = q.saturating_mul(b) / d;
+    let hi = q.saturating_mul(b);
     let lo = r.checked_mul(b).map(|v| v / d).unwrap_or_else(|| {
         ((r as f64) * (b as f64) / (d as f64)).clamp(0.0, u128::MAX as f64) as u128
     });
@@ -631,10 +631,21 @@ pub struct GateVerdict {
     pub reason: String,
 }
 
+/// All 12 mandatory gates must be present, distinct, and passing.
+///
+/// The length check alone is not enough: a caller that fills the slice with
+/// twelve copies of a single easy gate would otherwise "pass" the whole
+/// barrier while silently skipping the eleven gates that actually carry the
+/// reportability decision.
 pub fn evaluate_gates(verdicts: &[GateVerdict]) -> bool {
-    !verdicts.is_empty()
-        && verdicts.len() == Web3Gate::all().len()
-        && verdicts.iter().all(|v| v.passed)
+    let all = Web3Gate::all();
+    if verdicts.len() != all.len() || !verdicts.iter().all(|v| v.passed) {
+        return false;
+    }
+    all.iter().all(|gate| {
+        let matching = verdicts.iter().filter(|v| v.gate == *gate).count();
+        matching == 1
+    })
 }
 
 /// Evidence tier per claim — never mix reproduced with hypothetical.
@@ -1091,5 +1102,89 @@ mod tests {
             is_real_backing: false,
         });
         assert_eq!(g.representation_edges().len(), 1);
+    }
+
+    // --- regression tests -------------------------------------------------
+    // Each of these locks in a bug that previously shipped silently.
+
+    #[test]
+    fn mul_div_floor_does_not_divide_twice() {
+        // Regression: the quotient term used to be `q * b / d` instead of
+        // `q * b`, which is a division by an extra factor of `d` and made
+        // the LTV invariant fire on healthy, fully-collateralised pools.
+        assert_eq!(mul_div_floor(1_000_000, 7_500, 10_000), 750_000);
+        assert_eq!(mul_div_floor(1_234_567, 7_500, 10_000), 925_925);
+        // a < d: quotient term is zero, remainder term carries the result.
+        assert_eq!(mul_div_floor(7, 10, 100), 0);
+        // Exact division must be exact.
+        assert_eq!(mul_div_floor(10_000, 5_000, 10_000), 5_000);
+        // Floor semantics, not rounding.
+        assert_eq!(mul_div_floor(3, 1, 2), 1);
+        assert_eq!(mul_div_floor(1, 1, 3), 0);
+    }
+
+    #[test]
+    fn healthy_lending_pool_is_not_an_invariant_violation() {
+        // 10,000 tokens of collateral at 75% LTV allows 7,500 of debt.
+        // A pool borrowing 1,000 against it is comfortably healthy; the
+        // `mul_div_floor` regression reported it as violated.
+        let s = ProtocolState {
+            collateral_value: 10_000 * 1_000_000_000_000_000_000,
+            ltv_bps: 7_500,
+            debt: 1_000 * 1_000_000_000_000_000_000,
+            ..Default::default()
+        };
+        let violations = check_invariants(&s);
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.invariant == Web3Invariant::DebtLteCollateralTimesLtv),
+            "false positive on healthy pool: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn borrowing_past_ltv_is_detected() {
+        // Inverse of the above: 8,000 of debt against a 7,500 cap must fire.
+        let s = ProtocolState {
+            collateral_value: 10_000 * 1_000_000_000_000_000_000,
+            ltv_bps: 7_500,
+            debt: 8_000 * 1_000_000_000_000_000_000,
+            ..Default::default()
+        };
+        assert!(
+            check_invariants(&s)
+                .iter()
+                .any(|v| v.invariant == Web3Invariant::DebtLteCollateralTimesLtv),
+            "over-LTV borrow not detected"
+        );
+    }
+
+    #[test]
+    fn evaluate_gates_rejects_duplicate_gates() {
+        // Regression: the old check only compared lengths, so twelve copies
+        // of the easiest gate "passed" the whole 12-gate barrier.
+        let dup = GateVerdict {
+            gate: Web3Gate::Scope,
+            passed: true,
+            reason: "x".into(),
+        };
+        assert!(!evaluate_gates(&vec![dup.clone(); 12]));
+
+        // A genuinely complete, all-passing set must still pass.
+        let complete: Vec<GateVerdict> = Web3Gate::all()
+            .into_iter()
+            .map(|g| GateVerdict {
+                gate: g,
+                passed: true,
+                reason: "ok".into(),
+            })
+            .collect();
+        assert!(evaluate_gates(&complete));
+
+        // And one failing gate must still fail the set.
+        let mut with_failure = complete;
+        with_failure[0].passed = false;
+        assert!(!evaluate_gates(&with_failure));
     }
 }

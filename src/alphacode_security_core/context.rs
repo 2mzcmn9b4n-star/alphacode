@@ -128,8 +128,22 @@ impl SecurityContext {
     }
 
     /// Get confirmed findings.
+    ///
+    /// Includes findings that have already been advanced to `Report`: they are
+    /// still confirmed, and filtering on `ConfirmedFinding` alone silently
+    /// dropped every finding the moment it was reported — which emptied the
+    /// chain-analysis candidate set and made the reporter emit "0 confirmed
+    /// findings" for a run that had just confirmed one.
     pub fn confirmed_findings(&self) -> Vec<&Finding> {
-        self.findings_by_stage(&FindingStage::ConfirmedFinding)
+        self.findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.stage,
+                    FindingStage::ConfirmedFinding | FindingStage::Report
+                )
+            })
+            .collect()
     }
 
     /// Add an attack chain (dedups by id).

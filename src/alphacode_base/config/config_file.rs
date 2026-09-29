@@ -104,9 +104,40 @@ impl Config {
         }
 
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+        // Atomic write (temp + fsync + rename + `.bak` hard-link), not
+        // `std::fs::write`.
+        //
+        // `std::fs::write` is `File::create` (truncate to zero) followed by
+        // `write_all`. A crash, OOM-kill, ENOSPC or power loss between the
+        // truncate and the final byte leaves `config.toml` empty or half-written.
+        // The read side answers a parse failure with `Config::default()`
+        // (see `load_from_file` / `load`), so the user's provider, model, MCP
+        // servers and permission mode all silently revert to defaults — and the
+        // next `set_*` call then persists those defaults over the top, making
+        // the loss permanent. There was no `.bak` to recover from, because the
+        // correct helper 200 lines away in `alphacode_storage` was not used.
+        crate::alphacode_storage::write_bytes(&path, content.as_bytes())?;
         Self::invalidate_cache();
         Ok(())
+    }
+
+    /// Serialize a read-modify-write of the config file.
+    ///
+    /// Every mutator here (`set_copilot_premium`, `set_default_model`, the
+    /// reasoning-effort setters, the migrations) loads the whole file, patches
+    /// one field, and rewrites the whole file. Without a lock, two concurrent
+    /// mutators — the TUI thread and a server task, or two setters racing —
+    /// both read the pre-mutation state and both write the full document, so the
+    /// loser's change vanishes without any error.
+    fn mutate_config<T>(f: impl FnOnce(&mut Self) -> T) -> anyhow::Result<T> {
+        static CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = CONFIG_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut cfg = Self::load();
+        let out = f(&mut cfg);
+        cfg.save()?;
+        Ok(out)
     }
 
     /// Mark the process-cached config as stale and notify dependent caches.
@@ -117,9 +148,7 @@ impl Config {
     /// Update the copilot premium mode in the config file.
     /// Reloads, patches, and saves so it doesn't clobber other fields.
     pub fn set_copilot_premium(mode: Option<&str>) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
-        cfg.provider.copilot_premium = mode.map(|s| s.to_string());
-        cfg.save()?;
+        Self::mutate_config(|cfg| cfg.provider.copilot_premium = mode.map(|s| s.to_string()))?;
         crate::logging::info(&format!(
             "Saved copilot_premium to config: {}",
             mode.unwrap_or("(none)")
@@ -130,10 +159,10 @@ impl Config {
     /// Update just the default model and provider in the config file.
     /// This reloads, patches, and saves so it doesn't clobber other fields.
     pub fn set_default_model(model: Option<&str>, provider: Option<&str>) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
-        cfg.provider.default_model = model.map(|s| s.to_string());
-        cfg.provider.default_provider = provider.map(|s| s.to_string());
-        cfg.save()?;
+        Self::mutate_config(|cfg| {
+            cfg.provider.default_model = model.map(|s| s.to_string());
+            cfg.provider.default_provider = provider.map(|s| s.to_string());
+        })?;
         crate::logging::info(&format!(
             "Saved default model: {}, provider: {}",
             model.unwrap_or("(none)"),
@@ -156,9 +185,9 @@ impl Config {
 
     /// Update the persisted OpenAI reasoning effort preference.
     pub fn set_openai_reasoning_effort(value: Option<&str>) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
-        cfg.provider.openai_reasoning_effort = value.map(|s| s.to_string());
-        cfg.save()?;
+        Self::mutate_config(|cfg| {
+            cfg.provider.openai_reasoning_effort = value.map(|s| s.to_string());
+        })?;
         crate::logging::info(&format!(
             "Saved openai_reasoning_effort to config: {}",
             value.unwrap_or("(none)")
@@ -168,9 +197,9 @@ impl Config {
 
     /// Update the persisted Anthropic reasoning effort preference.
     pub fn set_anthropic_reasoning_effort(value: Option<&str>) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
-        cfg.provider.anthropic_reasoning_effort = value.map(|s| s.to_string());
-        cfg.save()?;
+        Self::mutate_config(|cfg| {
+            cfg.provider.anthropic_reasoning_effort = value.map(|s| s.to_string());
+        })?;
         crate::logging::info(&format!(
             "Saved anthropic_reasoning_effort to config: {}",
             value.unwrap_or("(none)")
@@ -180,9 +209,7 @@ impl Config {
 
     /// Update the persisted OpenAI transport preference.
     pub fn set_openai_transport(value: Option<&str>) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
-        cfg.provider.openai_transport = value.map(|s| s.to_string());
-        cfg.save()?;
+        Self::mutate_config(|cfg| cfg.provider.openai_transport = value.map(|s| s.to_string()))?;
         crate::logging::info(&format!(
             "Saved openai_transport to config: {}",
             value.unwrap_or("(none)")
@@ -192,9 +219,9 @@ impl Config {
 
     /// Update the persisted OpenAI service tier preference.
     pub fn set_openai_service_tier(value: Option<&str>) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
-        cfg.provider.openai_service_tier = value.map(|s| s.to_string());
-        cfg.save()?;
+        Self::mutate_config(|cfg| {
+            cfg.provider.openai_service_tier = value.map(|s| s.to_string());
+        })?;
         crate::logging::info(&format!(
             "Saved openai_service_tier to config: {}",
             value.unwrap_or("(none)")
@@ -204,18 +231,14 @@ impl Config {
 
     /// Update the persisted default alignment preference.
     pub fn set_display_centered(centered: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
-        cfg.display.centered = centered;
-        cfg.save()?;
+        Self::mutate_config(|cfg| cfg.display.centered = centered)?;
         crate::logging::info(&format!("Saved display.centered to config: {}", centered));
         Ok(())
     }
 
     /// Update the persisted reasoning display mode preference.
     pub fn set_reasoning_display(mode: ReasoningDisplayMode) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
-        cfg.display.set_reasoning_display(mode);
-        cfg.save()?;
+        Self::mutate_config(|cfg| cfg.display.set_reasoning_display(mode))?;
         crate::logging::info(&format!(
             "Saved display.reasoning_display to config: {}",
             mode.label()
@@ -225,9 +248,7 @@ impl Config {
 
     /// Update the persisted compact-notifications preference.
     pub fn set_compact_notifications(compact: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
-        cfg.display.compact_notifications = compact;
-        cfg.save()?;
+        Self::mutate_config(|cfg| cfg.display.compact_notifications = compact)?;
         crate::logging::info(&format!(
             "Saved display.compact_notifications to config: {}",
             compact
@@ -237,18 +258,14 @@ impl Config {
 
     /// Update the persisted pinned-todos preference.
     pub fn set_pin_todos(pin: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
-        cfg.display.pin_todos = pin;
-        cfg.save()?;
+        Self::mutate_config(|cfg| cfg.display.pin_todos = pin)?;
         crate::logging::info(&format!("Saved display.pin_todos to config: {}", pin));
         Ok(())
     }
 
     /// Update the persisted show-agentgrep-output preference.
     pub fn set_show_agentgrep_output(show: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
-        cfg.display.show_agentgrep_output = show;
-        cfg.save()?;
+        Self::mutate_config(|cfg| cfg.display.show_agentgrep_output = show)?;
         crate::logging::info(&format!(
             "Saved display.show_agentgrep_output to config: {}",
             show
@@ -258,9 +275,7 @@ impl Config {
 
     /// Update the persisted tool-call-details preference.
     pub fn set_tool_call_details(show: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
-        cfg.display.tool_call_details = show;
-        cfg.save()?;
+        Self::mutate_config(|cfg| cfg.display.tool_call_details = show)?;
         crate::logging::info(&format!(
             "Saved display.tool_call_details to config: {}",
             show
@@ -277,14 +292,15 @@ impl Config {
         entries: Vec<crate::alphacode_config_types::LaunchHotkeyEntry>,
         enabled: bool,
     ) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
-        cfg.launch_hotkeys.entries = entries;
-        cfg.launch_hotkeys.enabled = Some(enabled);
-        cfg.launch_hotkeys.imported = true;
-        cfg.save()?;
+        let mut count = 0usize;
+        Self::mutate_config(|cfg| {
+            cfg.launch_hotkeys.entries = entries;
+            cfg.launch_hotkeys.enabled = Some(enabled);
+            cfg.launch_hotkeys.imported = true;
+            count = cfg.launch_hotkeys.entries.len();
+        })?;
         crate::logging::info(&format!(
-            "Saved {} launch hotkey(s) to config (enabled={enabled})",
-            cfg.launch_hotkeys.entries.len()
+            "Saved {count} launch hotkey(s) to config (enabled={enabled})"
         ));
         Ok(())
     }
@@ -470,7 +486,11 @@ impl Config {
         if content.ends_with('\n') {
             new_content.push('\n');
         }
-        match std::fs::write(&path, new_content) {
+        // Atomic (temp + fsync + rename), same as `Config::save`: this rewrites
+        // the whole config file, so a truncating write here carries the same
+        // risk of leaving a half-written `config.toml` that then loads as
+        // defaults.
+        match crate::alphacode_storage::write_bytes(&path, new_content.as_bytes()) {
             Ok(()) => {
                 Self::invalidate_cache();
                 write_marker();
@@ -555,7 +575,8 @@ impl Config {
         if content.ends_with('\n') {
             new_content.push('\n');
         }
-        match std::fs::write(&path, new_content) {
+        // Atomic write, same reasoning as the swarm_spawn_mode migration above.
+        match crate::alphacode_storage::write_bytes(&path, new_content.as_bytes()) {
             Ok(()) => {
                 Self::invalidate_cache();
                 write_marker();
@@ -655,18 +676,18 @@ impl Config {
             anyhow::bail!("External auth source id cannot be empty");
         }
 
-        let mut cfg = Self::load();
-        if !cfg
-            .auth
-            .trusted_external_sources
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&source_id))
-        {
-            cfg.auth.trusted_external_sources.push(source_id.clone());
-            cfg.auth.trusted_external_sources.sort();
-            cfg.auth.trusted_external_sources.dedup();
-            cfg.save()?;
-        }
+        Self::mutate_config(|cfg| {
+            if !cfg
+                .auth
+                .trusted_external_sources
+                .iter()
+                .any(|value| value.trim().eq_ignore_ascii_case(&source_id))
+            {
+                cfg.auth.trusted_external_sources.push(source_id.clone());
+                cfg.auth.trusted_external_sources.sort();
+                cfg.auth.trusted_external_sources.dedup();
+            }
+        })?;
 
         crate::logging::info(&format!(
             "Saved trusted external auth source to config: {}",
@@ -680,18 +701,18 @@ impl Config {
         path: &std::path::Path,
     ) -> anyhow::Result<()> {
         let entry = Self::trusted_external_auth_path_entry(source_id, path)?;
-        let mut cfg = Self::load();
-        if !cfg
-            .auth
-            .trusted_external_source_paths
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
-        {
-            cfg.auth.trusted_external_source_paths.push(entry.clone());
-            cfg.auth.trusted_external_source_paths.sort();
-            cfg.auth.trusted_external_source_paths.dedup();
-            cfg.save()?;
-        }
+        Self::mutate_config(|cfg| {
+            if !cfg
+                .auth
+                .trusted_external_source_paths
+                .iter()
+                .any(|value| value.trim().eq_ignore_ascii_case(&entry))
+            {
+                cfg.auth.trusted_external_source_paths.push(entry.clone());
+                cfg.auth.trusted_external_source_paths.sort();
+                cfg.auth.trusted_external_source_paths.dedup();
+            }
+        })?;
         crate::logging::info(&format!(
             "Saved trusted external auth source path: {}",
             entry
@@ -704,16 +725,16 @@ impl Config {
         path: &std::path::Path,
     ) -> anyhow::Result<()> {
         let entry = Self::trusted_external_auth_path_entry(source_id, path)?;
-        let mut cfg = Self::load();
-        let before = cfg.auth.trusted_external_source_paths.len();
-        cfg.auth
-            .trusted_external_source_paths
-            .retain(|value| !value.trim().eq_ignore_ascii_case(&entry));
-        if cfg.auth.trusted_external_source_paths.len() != before {
-            cfg.save()?;
+        let removed = Self::mutate_config(|cfg| {
+            let before = cfg.auth.trusted_external_source_paths.len();
+            cfg.auth
+                .trusted_external_source_paths
+                .retain(|value| !value.trim().eq_ignore_ascii_case(&entry));
+            cfg.auth.trusted_external_source_paths.len() != before
+        })?;
+        if removed {
             crate::logging::info(&format!(
-                "Removed trusted external auth source path: {}",
-                entry
+                "Removed trusted external auth source path: {entry}"
             ));
         }
         Ok(())
@@ -726,16 +747,16 @@ impl Config {
         if source_id.is_empty() {
             return Ok(());
         }
-        let mut cfg = Self::load();
-        let before = cfg.auth.trusted_external_sources.len();
-        cfg.auth
-            .trusted_external_sources
-            .retain(|value| !value.trim().eq_ignore_ascii_case(&source_id));
-        if cfg.auth.trusted_external_sources.len() != before {
-            cfg.save()?;
+        let removed = Self::mutate_config(|cfg| {
+            let before = cfg.auth.trusted_external_sources.len();
+            cfg.auth
+                .trusted_external_sources
+                .retain(|value| !value.trim().eq_ignore_ascii_case(&source_id));
+            cfg.auth.trusted_external_sources.len() != before
+        })?;
+        if removed {
             crate::logging::info(&format!(
-                "Removed trusted external auth source: {}",
-                source_id
+                "Removed trusted external auth source: {source_id}"
             ));
         }
         Ok(())

@@ -1556,21 +1556,44 @@ impl App {
 
     pub(super) fn remember_input_undo_state(&mut self) {
         let snapshot = (self.input.clone(), self.cursor_pos.min(self.input.len()));
-        if self.input_undo_stack.last() == Some(&snapshot) {
+        if self.input_undo_stack.back() == Some(&snapshot) {
             return;
         }
-        if self.input_undo_stack.len() >= Self::INPUT_UNDO_LIMIT {
-            self.input_undo_stack.remove(0);
+        let snapshot_bytes = snapshot.0.capacity();
+        // Evict oldest-first until the new snapshot fits both budgets. A single
+        // snapshot larger than the byte budget is still recorded (otherwise the
+        // most recent edit becomes un-undoable), and is evicted on the next
+        // push; that keeps one oversized draft bounded to one copy rather than
+        // being able to consume the whole budget on its own.
+        while !self.input_undo_stack.is_empty()
+            && (self.input_undo_stack.len() >= Self::INPUT_UNDO_LIMIT
+                || self.input_undo_stack_bytes + snapshot_bytes > Self::INPUT_UNDO_MAX_BYTES)
+        {
+            self.drop_oldest_undo_state();
         }
-        self.input_undo_stack.push(snapshot);
+        self.input_undo_stack_bytes += snapshot_bytes;
+        self.input_undo_stack.push_back(snapshot);
+    }
+
+    /// Remove the oldest undo snapshot and keep the byte accounting in step.
+    fn drop_oldest_undo_state(&mut self) {
+        if let Some((text, _)) = self.input_undo_stack.pop_front() {
+            // `capacity()` is what was added on push, but shrink the released
+            // amount to the actual removal so a mismatch can never underflow.
+            let released = text.capacity().min(self.input_undo_stack_bytes);
+            self.input_undo_stack_bytes -= released;
+        }
     }
 
     pub(super) fn clear_input_undo_history(&mut self) {
         self.input_undo_stack.clear();
+        self.input_undo_stack_bytes = 0;
     }
 
     pub(super) fn undo_input_change(&mut self) {
-        if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
+        if let Some((input, cursor_pos)) = self.input_undo_stack.pop_back() {
+            let released = input.capacity().min(self.input_undo_stack_bytes);
+            self.input_undo_stack_bytes -= released;
             self.input = input;
             self.cursor_pos = cursor_pos.min(self.input.len());
             self.reset_tab_completion();

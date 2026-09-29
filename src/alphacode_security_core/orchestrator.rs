@@ -170,12 +170,24 @@ impl AdaptiveCycle {
     }
 
     /// Verification gate: combine quality + false-positive defense.
+    ///
+    /// A finding only reaches `VerifiedReportable` if the false-positive
+    /// defense was genuinely exercised. Previously `is_still_viable()` was the
+    /// only input and it was trivially true for an untested finding, so a
+    /// high-quality candidate that had never been attacked by a single negative
+    /// hypothesis was promoted straight to "verified reportable" — the exact
+    /// false positive this module exists to prevent.
     pub fn verification_verdict(
         quality: &VerificationQuality,
         defense: &FalsePositiveDefense,
     ) -> TerminationState {
-        if !defense.is_still_viable() {
+        if defense.is_refuted() {
             return TerminationState::Disproven;
+        }
+        if !defense.was_exercised() {
+            // Nothing has tried to break this finding yet. That is not a
+            // failure, but it is not verification either.
+            return TerminationState::Continue;
         }
         match quality.verification_state() {
             super::verification_quality::VerificationState::VerifiedReportable => {
@@ -230,6 +242,7 @@ pub struct AdaptiveSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alphacode_security_core::verification_quality::NegativeHypothesis;
 
     #[test]
     fn full_cycle_observe_select_record() {
@@ -251,6 +264,14 @@ mod tests {
             cycle.stopping_decision(0.8, 0.2, 0, false),
             TerminationState::Continue
         );
+    }
+
+    /// A high-quality candidate only reaches `VerifiedReportable` once the
+    /// false-positive defense has actually been exercised. An untouched
+    /// defense is `Continue`, not verification — otherwise a finding that
+    /// nobody has tried to break is promoted straight to reportable.
+    #[test]
+    fn verification_requires_an_exercised_false_positive_defense() {
         let q = VerificationQuality {
             reproducibility: 0.9,
             evidence_strength: 0.9,
@@ -260,10 +281,33 @@ mod tests {
             contradiction_level: 0.0,
             assumption_count: 0,
         };
-        let d = FalsePositiveDefense::new();
+        let untouched = FalsePositiveDefense::new();
+        assert!(
+            !untouched.was_exercised(),
+            "a fresh defense must not claim it was tested"
+        );
         assert_eq!(
-            AdaptiveCycle::verification_verdict(&q, &d),
+            AdaptiveCycle::verification_verdict(&q, &untouched),
+            TerminationState::Continue,
+            "an untested finding must not be promoted to reportable"
+        );
+
+        let mut attacked = FalsePositiveDefense::new();
+        attacked.record_survived(NegativeHypothesis::PublicByDesign);
+        attacked.record_survived(NegativeHypothesis::NonSensitive);
+        assert!(attacked.was_exercised());
+        assert_eq!(
+            AdaptiveCycle::verification_verdict(&q, &attacked),
             TerminationState::VerifiedReportable
+        );
+
+        // Refuted by any negative hypothesis -> disproven, regardless of quality.
+        let mut refuted = FalsePositiveDefense::new();
+        refuted.record_survived(NegativeHypothesis::PublicByDesign);
+        refuted.record_refuted(NegativeHypothesis::Unreachable);
+        assert_eq!(
+            AdaptiveCycle::verification_verdict(&q, &refuted),
+            TerminationState::Disproven
         );
     }
 }

@@ -547,6 +547,25 @@ pub mod tests {
     include!("smoothness_benchmark.rs");
     include!("spinner_slash_commands.rs");
     include!("state_model_poke_03.rs");
+    // Every test in this file asserts on the mermaid ACTIVE_DIAGRAMS registry:
+    // they need a plan-graph message to actually *render* a diagram, and
+    // diagram rendering is compiled out unless `mermaid-renderer` is enabled
+    // (`mermaid-renderer` is deliberately not in `default`). Without the gate
+    // they fail on a default build with "expected 1 active diagram, got 0",
+    // which is a property of the feature set rather than of the code under
+    // test.
+    //
+    // CI runs `cargo test --lib` with default features, so before this gate the
+    // whole file was a guaranteed-red block on every build. The cost of the
+    // gate is that `test_swarm_plan_pushes_no_plan_graph_message_when_mermaid_
+    // disabled` now only runs with the feature on; the "no diagram registered"
+    // path is still covered on a default build by
+    // `swarm_plan_no_inline_graph::swarm_plan_with_no_items_does_not_add_an_
+    // inline_diagram`.
+    //
+    // Run the full mermaid suite with:
+    //   cargo test --lib --features mermaid-renderer swarm_plan_graph
+    #[cfg(feature = "mermaid-renderer")]
     include!("swarm_plan_graph_inline.rs");
     include!("swarm_plan_no_inline_graph.rs");
     include!("terminal_setup_command.rs");

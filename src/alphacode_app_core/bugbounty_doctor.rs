@@ -143,6 +143,72 @@ pub const TOOL_SPECS: &[ToolSpec] = &[
         purpose: "HTTP downloader",
         install: "apt: apt install -y wget   | brew: brew install wget   | winget: winget install JernejSimoncic.Wget",
     },
+    // Additional recon tools
+    ToolSpec {
+        binary: "unfurl",
+        purpose: "URL parsing and normalization",
+        install: "go: go install -v github.com/tomnomnom/unfurl@latest",
+    },
+    ToolSpec {
+        binary: "meg",
+        purpose: "URL extraction at scale",
+        install: "go: go install -v github.com/tomnomnom/meg@latest",
+    },
+    ToolSpec {
+        binary: "gf",
+        purpose: "Grep patterns for vulnerability discovery",
+        install: "go: go install -v github.com/tomnomnom/gf@latest",
+    },
+    ToolSpec {
+        binary: "feroxbuster",
+        purpose: "Fast content discovery",
+        install: "go: go install -v github.com/epi052/feroxbuster@latest",
+    },
+    ToolSpec {
+        binary: "hakrawler",
+        purpose: "Web crawler with JavaScript parsing",
+        install: "go: go install -v github.com/hakluke/hakrawler@latest",
+    },
+    ToolSpec {
+        binary: "gospider",
+        purpose: "Fast web spider",
+        install: "go: go install -v github.com/jaeles-project/gospider@latest",
+    },
+    ToolSpec {
+        binary: "dalfox",
+        purpose: "XSS scanner and payload generator",
+        install: "go: go install -v github.com/hahwul/dalfox/v2@latest",
+    },
+    ToolSpec {
+        binary: "kxss",
+        purpose: "XSS reflection finder",
+        install: "go: go install -v github.com/Emoe/kxss@latest",
+    },
+    ToolSpec {
+        binary: "corsy",
+        purpose: "CORS misconfiguration scanner",
+        install: "go: go install -v github.com/s0md3v/Corsy@latest",
+    },
+    ToolSpec {
+        binary: "crlfuzz",
+        purpose: "CRLF injection scanner",
+        install: "go: go install -v github.com/dwisiswant0/crlfuzz/cmd/crlfuzz@latest",
+    },
+    ToolSpec {
+        binary: "cariddi",
+        purpose: "Web crawler and scanner",
+        install: "go: go install -v github.com/edoardottt/cariddi/cmd/cariddi@latest",
+    },
+    ToolSpec {
+        binary: "httprobe",
+        purpose: "Probe live hosts",
+        install: "go: go install -v github.com/tomnomnom/httprobe@latest",
+    },
+    ToolSpec {
+        binary: "qsreplace",
+        purpose: "Query string parameter replacer",
+        install: "go: go install -v github.com/tomnomnom/qsreplace@latest",
+    },
 ];
 
 /// A tool we know about: its binary name, what it does, and how to
@@ -196,7 +262,7 @@ pub fn probe() -> Vec<ToolReport> {
 /// `which <binary>` wrapper. Falls back to checking the bare binary name
 /// on Windows (e.g. `subfinder.exe`) and to looking in `$PATH` directly
 /// if `which` is unavailable.
-fn which(binary: &str) -> ToolStatus {
+pub fn which(binary: &str) -> ToolStatus {
     // Try `which` first (POSIX + Git Bash + most CI).
     let candidates: &[&str] = if cfg!(windows) {
         &["where.exe", "which.exe", "which"]
@@ -227,23 +293,114 @@ fn which(binary: &str) -> ToolStatus {
             if dir.is_empty() {
                 continue;
             }
-            let candidate = std::path::Path::new(dir).join(binary);
-            if candidate.is_file() {
+            // Skip *relative* PATH entries. They resolve against the process
+            // working directory, so a `./nuclei` file in the cwd would be
+            // reported as an installed tool — and, because `CreateProcess`
+            // applies the same rule, would then actually be the binary that
+            // gets executed. That is the classic cwd-hijack, and a doctor
+            // that cannot see it is worse than no doctor.
+            let dir_path = std::path::Path::new(dir);
+            if dir_path.is_relative() {
+                continue;
+            }
+            let candidate = dir_path.join(binary);
+            if candidate.is_file() && is_executable(&candidate) {
                 return ToolStatus::Present {
                     path: candidate.to_string_lossy().into_owned(),
                 };
             }
             if cfg!(windows) {
-                let with_exe = candidate.with_extension("exe");
-                if with_exe.is_file() {
+                // Try every extension in PATHEXT, not just `.exe`, so `.cmd`
+                // and `.bat` shims are not reported as missing.
+                for ext in pathexts() {
+                    let with_ext = candidate.with_extension(ext);
+                    if with_ext.is_file() {
+                        return ToolStatus::Present {
+                            path: with_ext.to_string_lossy().into_owned(),
+                        };
+                    }
+                }
+            }
+        }
+    }
+    // `go install` writes to ~/go/bin, which is not on PATH by default on
+    // Windows (and frequently not on Linux/macOS). Without this, a perfectly
+    // successful install is reported as still missing, and the installer's own
+    // post-install verification fails forever.
+    if let Some(go_bin) = super::bugbounty_install::go_bin_dir() {
+        let candidate = go_bin.join(binary);
+        if candidate.is_file() && is_executable(&candidate) {
+            return ToolStatus::Present {
+                path: candidate.to_string_lossy().into_owned(),
+            };
+        }
+        if cfg!(windows) {
+            for ext in pathexts() {
+                let with_ext = candidate.with_extension(ext);
+                if with_ext.is_file() {
                     return ToolStatus::Present {
-                        path: with_exe.to_string_lossy().into_owned(),
+                        path: with_ext.to_string_lossy().into_owned(),
                     };
                 }
             }
         }
     }
     ToolStatus::Missing
+}
+
+/// Extensions to try on Windows, defaulting to `.exe` when PATHEXT is unset.
+fn pathexts() -> Vec<&'static str> {
+    const DEFAULT: &[&str] = &["exe"];
+    match std::env::var("PATHEXT") {
+        Ok(v) if !v.trim().is_empty() => {
+            let exts: Vec<&'static str> = v
+                .split(';')
+                .filter_map(|e| {
+                    let e = e.trim().trim_start_matches('.').to_ascii_lowercase();
+                    // PATHEXT is a handful of short, process-stable strings,
+                    // so interning them once is a bounded leak and avoids
+                    // re-deriving the list on every lookup.
+                    if e.is_empty() {
+                        None
+                    } else {
+                        Some(&*Box::leak(e.into_boxed_str()))
+                    }
+                })
+                .collect();
+            if exts.is_empty() {
+                DEFAULT.to_vec()
+            } else {
+                exts
+            }
+        }
+        _ => DEFAULT.to_vec(),
+    }
+}
+
+/// A file is only usable as a tool if it is a real, executable regular file.
+///
+/// `Path::is_file` follows symlinks and, on Unix, is true for *any* regular
+/// file — including a non-executable text file left behind by a failed
+/// install. Reporting that as "present" makes the recon tool fail later at
+/// exec time with a confusing `EACCES`, so check the execute bit.
+fn is_executable(path: &std::path::Path) -> bool {
+    let Ok(meta) = path.metadata() else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows has no execute bit; extension is the only signal, and the
+        // caller already filtered on it.
+        true
+    }
 }
 
 /// Render the probe as a single markdown string ready to drop into a

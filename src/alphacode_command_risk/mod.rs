@@ -37,6 +37,12 @@ mod paths;
 mod shell_url_safety;
 mod tokenize;
 
+// `paths_tests` / `tokenize_tests` are attached to their own modules (they use
+// `super::` to reach private helpers), so they are not registered here.
+#[cfg(test)]
+#[path = "bypass_tests.rs"]
+mod bypass_tests;
+
 pub use gate::{GateOutcome, Justification, gate};
 pub use paths::{ProtectedPaths, is_catastrophic_target};
 #[allow(unused_imports)]
@@ -157,20 +163,80 @@ fn dirs_home() -> Option<std::path::PathBuf> {
         .or_else(dirs::home_dir)
 }
 
+/// Case-insensitive membership test for [`DESTRUCTIVE_COMMANDS`].
+///
+/// Windows command names are case-insensitive and PowerShell cmdlets are
+/// conventionally PascalCase (`Remove-Item`), so a case-sensitive lookup left
+/// every PowerShell destructive cmdlet unmatched — the exact class of command
+/// the bash tool's own schema tells the model to use.
+fn is_destructive_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    // `mkfs.ext4`, `wipefs.sha256`, `del.exe` are the real program names on
+    // disk; the bare stem is what the list holds.
+    let stem = lower.split_once('.').map(|(s, _)| s).unwrap_or(&lower);
+    DESTRUCTIVE_COMMANDS.contains(&lower.as_str()) || DESTRUCTIVE_COMMANDS.contains(&stem)
+}
+
 /// Commands that destroy data as their primary purpose.
 ///
 /// Presence here does not by itself mean danger: `rm` inside the working
 /// directory is routine. It means "inspect the targets".
 const DESTRUCTIVE_COMMANDS: &[&str] = &[
-    "rm", "rmdir", "shred", "unlink", "truncate", "dd", "mkfs", "fdisk", "parted", "wipefs", "srm",
+    // POSIX. Matched on the stem too, so `mkfs.ext4` and `wipefs.sha256`
+    // resolve to their `mkfs` / `wipefs` entries.
+    "rm",
+    "rmdir",
+    "shred",
+    "unlink",
+    "truncate",
+    "dd",
+    "mkfs",
+    "fdisk",
+    "parted",
+    "wipefs",
+    "srm",
+    // Windows commands. `del`/`erase` remove files, `rd` removes trees,
+    // `format`/`diskpart` destroy volumes. These were missing entirely, so
+    // `del /f /s /q C:\Users\me\Documents` classified as Safe on the platform
+    // where the gate matters most.
+    "del",
+    "erase",
+    "rd",
+    "format",
+    "diskpart",
+    "cipher",
+    "fsutil",
+    "del.exe",
+    // PowerShell cmdlets. `Remove-Item -Recurse -Force` is `rm -rf`, and the
+    // bash tool's own schema tells the model to reach for
+    // `powershell -Command '...'`, so omitting these left the documented
+    // Windows path completely unguarded.
+    "remove-item",
+    "clear-content",
+    "set-content",
+    "out-file",
+    "new-item",
+    "format-volume",
+    "initialize-disk",
+    "remove-partition",
+    "clear-disk",
+    "remove-vm",
+    "stop-vm",
+    "set-mppreference",
+    "takeown",
 ];
 
 /// Commands that run another command. The real program is one of their
 /// arguments, so `sudo rm -rf ~` must be unwrapped before classification or the
 /// destructive verb is never seen at all.
+///
+/// `eval` is deliberately absent: it is not a transparent wrapper but a
+/// *string* evaluator, so `eval "rm -rf ~"` must be handled by the
+/// opaque-shell path instead. Listing it here consumed the token and left the
+/// quoted script as the "program name", which matched nothing.
 const WRAPPER_COMMANDS: &[&str] = &[
     "sudo", "doas", "env", "nice", "ionice", "time", "timeout", "nohup", "xargs", "command",
-    "builtin", "exec", "setsid", "stdbuf", "chroot", "su", "watch", "eval",
+    "builtin", "exec", "setsid", "stdbuf", "chroot", "su", "watch",
 ];
 
 /// Wrapper options that consume the following word as their value.
@@ -187,7 +253,43 @@ const WRAPPER_FLAGS_WITH_VALUES: &[&str] = &[
 
 /// Shells, which take their program from a string argument we cannot parse
 /// reliably. Treated as opaque rather than assumed safe.
-const SHELL_COMMANDS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+///
+/// The Windows shells belong here too. `powershell -Command "Remove-Item
+/// -Recurse -Force $env:USERPROFILE"` was previously invisible to this gate
+/// (and the tool schema actively *instructs* the model to reach for
+/// `powershell -Command` / `cmd.exe /C`), so it is a bypass on the platform
+/// where it is most dangerous.
+const SHELL_COMMANDS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    // Windows shells + string evaluators.
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
+    "cmd",
+    "cmd.exe",
+    "eval",
+    "source",
+];
+
+/// Whether `name`, appearing in *program position*, is a shell or string
+/// evaluator whose real program cannot be parsed reliably.
+///
+/// `.` (the POSIX `source` builtin) is handled here rather than in
+/// [`SHELL_COMMANDS`] because that list is also consulted in *argument*
+/// position by the hidden-verb scan. With `.` in the list, every bare `.`
+/// argument matched, so `ls .`, `ls -la .`, `find . -type f`, `grep -r foo .`
+/// and `cargo fmt .` were all hard-denied as `Catastrophic` — among the most
+/// common commands an agent emits. As a program name, `. script.sh` is still
+/// correctly treated as opaque.
+fn is_shell_program(name: &str) -> bool {
+    SHELL_COMMANDS.contains(&name) || name == "."
+}
 
 /// Commands that are destructive only with specific flags.
 const CONDITIONALLY_DESTRUCTIVE: &[(&str, &[&str])] = &[
@@ -196,6 +298,38 @@ const CONDITIONALLY_DESTRUCTIVE: &[(&str, &[&str])] = &[
     ("chmod", &["-R"]),
     ("chown", &["-R"]),
 ];
+
+/// Whether a token is a `NAME=value` environment assignment rather than a word.
+///
+/// Requires a valid shell identifier before the `=`. A loose `contains('=')`
+/// would also swallow legitimate path arguments like `a=b.txt` or
+/// `?filter=name`, hiding the real program.
+fn is_assignment(text: &str) -> bool {
+    let Some((name, _)) = text.split_once('=') else {
+        return false;
+    };
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().expect("name is non-empty");
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Drop leading `VAR=value` tokens from a segment.
+fn strip_leading_assignments(mut tokens: &[Token]) -> &[Token] {
+    while let Some(first) = tokens.first() {
+        if is_assignment(&first.text) {
+            tokens = &tokens[1..];
+        } else {
+            break;
+        }
+    }
+    tokens
+}
 
 /// Assess a single shell command string.
 ///
@@ -215,10 +349,17 @@ pub fn assess(command: &str, ctx: &RiskContext) -> RiskAssessment {
 }
 
 fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFinding>) {
+    // Leading `VAR=value` assignments set the environment for the command that
+    // follows and are not the command. They must be stripped *before* the
+    // wrapper loop: the loop only skipped them after a wrapper program, so a
+    // segment that begins with an assignment never got unwrapped and its
+    // `program_name` became the assignment itself. `LANG=C rm -rf ~` therefore
+    // classified as Safe.
+    let mut tokens = strip_leading_assignments(tokens);
+
     // Strip wrapper programs (`sudo`, `env`, `xargs`, ...) so the destructive
     // verb underneath is the one we classify. Without this, any common prefix
     // is a complete bypass.
-    let mut tokens = tokens;
     let mut wrapped_by: Option<String> = None;
     loop {
         let Some(first) = tokens.first() else {
@@ -247,7 +388,7 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         let mut idx = 0;
         while idx < rest.len() {
             let token = &rest[idx];
-            if token.is_operator || token.text.contains('=') {
+            if token.is_operator || is_assignment(&token.text) {
                 idx += 1;
                 continue;
             }
@@ -269,7 +410,6 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         }
         tokens = &rest[idx..];
     }
-
     let Some(program) = tokens.first() else {
         // A wrapper with nothing recognizable after it hides its payload.
         if let Some(wrapper) = wrapped_by {
@@ -286,9 +426,51 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
     };
     let program_name = program.basename();
 
+    // `mkfs.ext4`, `mkfs.xfs`, `mke2fs`, `wipefs.sha256` etc. are the real
+    // program names on disk — the bare stem in the list never matches, so
+    // `mkfs.ext4 /dev/sda1` classified as Safe. `is_destructive_name` also
+    // lowercases, because Windows command names are case-insensitive and
+    // PowerShell cmdlets are conventionally PascalCase.
+    let is_destructive = is_destructive_name(&program_name);
+
+    // Defense in depth for wrappers whose option grammar we could not parse.
+    // The unwrap loop stops at the first word it does not recognise as a
+    // wrapper operand, so `chroot /tmp/jail rm -rf ~`, `su - root -c "..."` and
+    // `xargs -I {} rm -rf ~` all leave a *non-program* in slot 0 and hide the
+    // destructive verb behind it. Rather than trying to model every wrapper's
+    // flag grammar, scan the whole segment for a known destructive verb; if one
+    // is present the segment is unsafe no matter what we think runs first.
+    if !is_destructive && !is_shell_program(&program_name) {
+        let hidden = tokens.iter().find_map(|t| {
+            // A quoted argument can itself be a whole command string
+            // (`su - root -c "rm -rf ~"`), so the scan has to look *inside*
+            // each token as well as at the token itself.
+            let mut words: Vec<String> = t.text.split_whitespace().map(str::to_string).collect();
+            words.push(t.basename());
+            for name in words {
+                let name = name.rsplit(['/', '\\']).next().unwrap_or(&name).to_string();
+                if is_destructive_name(&name) || SHELL_COMMANDS.contains(&name.as_str()) {
+                    return Some(name);
+                }
+            }
+            None
+        });
+        if let Some(name) = hidden {
+            findings.push(RiskFinding {
+                level: RiskLevel::Catastrophic,
+                reason: format!(
+                    "`{name}` appears inside a `{program_name}` invocation whose \
+                     real command line could not be resolved statically"
+                ),
+                target: None,
+            });
+            return;
+        }
+    }
+
     // A shell invoked with an inline script is opaque to this parser. Assess
     // the script text too, so `sh -c "rm -rf ~"` is not a free pass.
-    if SHELL_COMMANDS.contains(&program_name.as_str()) {
+    if is_shell_program(&program_name) {
         for token in tokens.iter().skip(1).filter(|t| !t.is_flag()) {
             for segment in tokenize::split_segments(&token.text) {
                 assess_segment(&segment, ctx, findings);
@@ -297,7 +479,8 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         return;
     }
 
-    let is_destructive = DESTRUCTIVE_COMMANDS.contains(&program_name.as_str());
+    // `is_destructive` (including the `mkfs.ext4`-style stem match) is computed
+    // once, above, before the shell handling.
     let conditional_flags = CONDITIONALLY_DESTRUCTIVE
         .iter()
         .find(|(name, _)| *name == program_name)

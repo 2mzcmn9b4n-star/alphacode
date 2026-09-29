@@ -132,7 +132,9 @@ impl BackgroundTaskManager {
 
     async fn write_status_file(&self, path: &std::path::Path, status: &TaskStatusFile) {
         if let Ok(json) = serde_json::to_string_pretty(status) {
-            let _ = fs::write(path, json).await;
+            if let Err(e) = fs::write(path, json).await {
+                tracing::warn!("Failed to write status file {}: {}", path.display(), e);
+            }
         }
     }
 
@@ -1170,6 +1172,35 @@ impl BackgroundTaskManager {
                 .finalize_detached_status_if_needed(status, &status_path)
                 .await;
             if status.status != BackgroundTaskStatus::Running || !status.detached {
+                return Ok(false);
+            }
+
+            // A status file on disk is untrusted input for the purpose of a
+            // *kill*. The pid below is read straight out of a JSON file, and
+            // Windows recycles pids freely: if the process that owned this
+            // task died before finalizing (server stop --force, OOM, power
+            // loss) the file stays `Running`, its pid exits, and the OS hands
+            // that number to some unrelated long-lived process — a browser, a
+            // database, a CI agent.
+            //
+            // `finalize_detached_status_if_needed` makes this worse rather
+            // than better: it calls `is_process_running(pid)`, which now
+            // returns true for the *wrong* process and so confirms the status
+            // is still live.
+            //
+            // `TaskStatusFile` already carries `owner_pid` / `owner_instance`
+            // for exactly this discrimination (see `background/model.rs`), and
+            // `status_is_reconcilable_orphan` consults them — this is the one
+            // path that did not. Refuse any status file this process image
+            // cannot vouch for, rather than `taskkill /T /F`-ing a pid we
+            // merely read.
+            if status.owner_instance.as_deref() != Some(model::process_instance_token()) {
+                crate::logging::warn(&format!(
+                    "[bg] refusing to cancel task {task_id}: status file was written by a \
+                     different process image (owner_pid={:?}, owner_instance={:?}); its pid may \
+                     since have been recycled",
+                    status.owner_pid, status.owner_instance
+                ));
                 return Ok(false);
             }
 

@@ -424,7 +424,7 @@ pub fn is_model_available(model_dir: &Path) -> bool {
 
 fn download_model(model_dir: &Path) -> Result<()> {
     let model_dir = model_dir.to_path_buf();
-    match std::thread::spawn(move || download_model_blocking(&model_dir)).join() {
+    match tokio::task::spawn_blocking(move || download_model_blocking(&model_dir)).await {
         Ok(result) => result,
         Err(panic) => {
             let panic_msg = if let Some(msg) = panic.downcast_ref::<&str>() {

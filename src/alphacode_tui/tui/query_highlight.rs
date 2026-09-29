@@ -21,7 +21,6 @@
 //! slice the original text.
 
 use ratatui::prelude::*;
-use unicode_width::UnicodeWidthChar;
 
 /// Character indices of `text` that match `query`, or `None` when the query is
 /// blank or does not match at all.
@@ -45,14 +44,11 @@ pub fn matched_char_indices(text: &str, query: &str) -> Option<Vec<usize>> {
 
     for term in terms {
         let indices = match_term(&hay, &term)?;
-        for idx in indices {
-            if !matched.contains(&idx) {
-                matched.push(idx);
-            }
-        }
+        matched.extend(indices);
     }
 
     matched.sort_unstable();
+    matched.dedup();
     (!matched.is_empty()).then_some(matched)
 }
 
@@ -101,9 +97,9 @@ fn match_term(hay: &[char], term: &[char]) -> Option<Vec<usize>> {
 /// Returns a single span when there is no query or no match, so callers can use
 /// this unconditionally.
 pub fn highlight(text: &str, query: &str, base: Style, hit: Style) -> Vec<Span<'static>> {
-    let chars: Vec<char> = text.chars().collect();
+    let char_count = text.chars().count();
     let matched = matched_char_indices(text, query);
-    spans_for_range(text, matched.as_deref(), 0, chars.len(), base, hit)
+    spans_for_range(text, matched.as_deref(), 0, char_count, base, hit)
 }
 
 /// Like [`highlight`], but never returns more than `budget` display columns.
@@ -130,7 +126,7 @@ pub fn highlight_within(
         return Vec::new();
     }
 
-    let widths: Vec<usize> = chars.iter().map(|c| c.width().unwrap_or(0)).collect();
+    let widths: Vec<usize> = chars.iter().map(|c| unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0)).collect();
     let total: usize = widths.iter().sum();
     let matched = matched_char_indices(text, query);
 

@@ -142,7 +142,21 @@ impl CoverageTracker {
         ep_cov.last_tested = Some(timestamp);
 
         if is_positive {
-            ep_cov.vuln_classes_with_signal.insert(vuln_class);
+            ep_cov.vuln_classes_with_signal.insert(vuln_class.clone());
+        } else {
+            // A re-test that comes back negative must clear the signal. The
+            // counters above are correctly decremented, but this set was only
+            // ever inserted into, so a re-test that refuted a finding left the
+            // endpoint permanently flagged as "has signal" — and both
+            // `shallow_coverage` and `high_value_endpoints` kept recommending
+            // it as a top candidate for deeper testing.
+            let still_positive = self
+                .test_results
+                .values()
+                .any(|r| r.vuln_class == vuln_class && r.result.is_positive());
+            if !still_positive {
+                ep_cov.vuln_classes_with_signal.remove(&vuln_class);
+            }
         }
 
         // Update stats

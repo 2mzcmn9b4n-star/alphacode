@@ -204,6 +204,7 @@ impl StreamBuffer {
         self.ceiling_carry = 0.0;
         self.reasoning_open = false;
         self.last_reveal = Instant::now();
+        self.jitter = JitterRecorder::default();
     }
 
     pub fn debug_memory_profile(&self) -> StreamBufferMemoryProfile {
@@ -217,7 +218,7 @@ impl StreamBuffer {
             .sum();
         StreamBufferMemoryProfile {
             buffered_text_bytes,
-            base_reveal_cps: self.base_cps as u32,
+            base_reveal_cps: self.base_cps.round() as u32,
         }
     }
 
@@ -277,6 +278,9 @@ impl StreamBuffer {
 
         let controller_budget = self.carry.floor() as usize;
         let ceiling_budget = self.ceiling_carry.floor() as usize;
+        // Prevent overflow when carry values are extremely large
+        let controller_budget = controller_budget.min(usize::MAX / 2);
+        let ceiling_budget = ceiling_budget.min(usize::MAX / 2);
         let mut reveal = controller_budget.min(ceiling_budget);
         if reveal == 0 {
             // Budget hasn't reached a whole char yet; keep accumulating. Leading
@@ -323,11 +327,10 @@ impl StreamBuffer {
                     let available = text.chars().count();
                     let take = char_count.min(available);
                     let chunk = if take == available {
-                        let QueuedOp::Chunk { text, .. } = self.queue.pop_front().expect("front")
-                        else {
-                            unreachable!()
-                        };
-                        text
+                        match self.queue.pop_front() {
+                            Some(QueuedOp::Chunk { text, .. }) => text,
+                            _ => break,
+                        }
                     } else {
                         let end = text
                             .char_indices()
@@ -433,15 +436,58 @@ pub struct SeriesStats {
 
 impl SeriesStats {
     fn compute(series: &VecDeque<JitterEvent>, kind: Option<StreamKind>) -> Self {
-        let events: Vec<&JitterEvent> = series
-            .iter()
-            .filter(|e| kind.is_none_or(|k| e.kind == k))
-            .collect();
+        // Single pass: collect filtered events without allocating a Vec
+        let mut total_chars = 0usize;
+        let mut max_chunk = 0usize;
+        let mut chunk_count = 0usize;
+        let mut chunk_sum = 0.0_f64;
+        let mut chunk_sum_sq = 0.0_f64;
+        let mut gap_sum = 0.0_f64;
+        let mut _gap_sum_sq = 0.0_f64;
+        let mut max_gap_ms = 0.0_f64;
+        let mut gap_count = 0usize;
+        let mut first_at = None;
+        let mut last_at = None;
+        let mut bucket_chars: Vec<f64> = Vec::new();
+        let mut bucket_start = None;
+
+        for e in series.iter().filter(|e| kind.is_none_or(|k| e.kind == k)) {
+            let chars = e.chars;
+            total_chars += chars;
+            max_chunk = max_chunk.max(chars);
+            chunk_count += 1;
+            let c = chars as f64;
+            chunk_sum += c;
+            chunk_sum_sq += c * c;
+
+            if let Some(prev) = last_at {
+                let gap = e.at.duration_since(prev).as_secs_f64() * 1000.0;
+                gap_sum += gap;
+                _gap_sum_sq += gap * gap;
+                max_gap_ms = max_gap_ms.max(gap);
+                gap_count += 1;
+            }
+            if first_at.is_none() {
+                first_at = Some(e.at);
+                bucket_start = Some(e.at);
+            }
+            last_at = Some(e.at);
+
+            // Bucket accumulation
+            if let Some(start) = bucket_start {
+                let idx = e.at.duration_since(start).as_millis() as usize / 100;
+                if idx >= bucket_chars.len() {
+                    bucket_chars.resize(idx + 1, 0.0);
+                }
+                bucket_chars[idx] += c;
+            }
+        }
+
         let mut stats = SeriesStats {
-            events: events.len(),
-            total_chars: events.iter().map(|e| e.chars).sum(),
+            events: chunk_count,
+            total_chars,
             mean_chunk: 0.0,
-            max_chunk: events.iter().map(|e| e.chars).max().unwrap_or(0),
+            max_chunk,
             p95_chunk: 0,
             chunk_cv: 0.0,
             mean_gap_ms: 0.0,
@@ -451,37 +497,50 @@ impl SeriesStats {
             bucket_100ms_max_chars: 0,
             span_ms: 0.0,
         };
-        if events.is_empty() {
+
+        if chunk_count == 0 {
             return stats;
         }
 
-        let chunks: Vec<f64> = events.iter().map(|e| e.chars as f64).collect();
-        stats.mean_chunk = mean(&chunks);
-        stats.p95_chunk = percentile_usize(events.iter().map(|e| e.chars), 0.95);
-        stats.chunk_cv = coefficient_of_variation(&chunks);
+        stats.mean_chunk = chunk_sum / chunk_count as f64;
+        stats.chunk_cv = if chunk_count >= 2 {
+            let var = (chunk_sum_sq - chunk_sum * chunk_sum / chunk_count as f64)
+                / chunk_count as f64;
+            var.sqrt() / stats.mean_chunk
+        } else {
+            0.0
+        };
 
-        if events.len() >= 2 {
-            let gaps: Vec<f64> = events
-                .windows(2)
-                .map(|w| w[1].at.duration_since(w[0].at).as_secs_f64() * 1000.0)
-                .collect();
-            stats.mean_gap_ms = mean(&gaps);
-            stats.p95_gap_ms = percentile_f64(&gaps, 0.95);
-            stats.max_gap_ms = gaps.iter().copied().fold(0.0_f64, f64::max);
-
-            let start = events.first().expect("non-empty").at;
-            let span = events.last().expect("non-empty").at.duration_since(start);
-            stats.span_ms = span.as_secs_f64() * 1000.0;
-            let bucket_count = (span.as_millis() as usize / 100).max(1) + 1;
-            let mut buckets = vec![0.0_f64; bucket_count];
-            for e in &events {
-                let idx = (e.at.duration_since(start).as_millis() as usize / 100)
-                    .min(bucket_count.saturating_sub(1));
-                buckets[idx] += e.chars as f64;
-            }
-            stats.bucket_100ms_cv = coefficient_of_variation(&buckets);
-            stats.bucket_100ms_max_chars = buckets.iter().copied().fold(0.0_f64, f64::max) as usize;
+        if gap_count > 0 {
+            stats.mean_gap_ms = gap_sum / gap_count as f64;
+            stats.max_gap_ms = max_gap_ms;
         }
+
+        if let (Some(first), Some(last)) = (first_at, last_at) {
+            let span = last.duration_since(first);
+            stats.span_ms = span.as_secs_f64() * 1000.0;
+        }
+
+        if !bucket_chars.is_empty() {
+            let bucket_sum: f64 = bucket_chars.iter().sum();
+            let bucket_mean = bucket_sum / bucket_chars.len() as f64;
+            let bucket_var = bucket_chars
+                .iter()
+                .map(|&v| (v - bucket_mean).powi(2))
+                .sum::<f64>()
+                / bucket_chars.len() as f64;
+            stats.bucket_100ms_cv = if bucket_mean.abs() > f64::EPSILON {
+                bucket_var.sqrt() / bucket_mean
+            } else {
+                0.0
+            };
+            stats.bucket_100ms_max_chars = bucket_chars
+                .iter()
+                .copied()
+                .fold(0.0_f64, f64::max)
+                .round() as usize;
+        }
+
         stats
     }
 }
@@ -498,41 +557,7 @@ pub struct StreamJitterProfile {
     pub text_reveals: SeriesStats,
 }
 
-fn mean(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    values.iter().sum::<f64>() / values.len() as f64
-}
 
-fn coefficient_of_variation(values: &[f64]) -> f64 {
-    let m = mean(values);
-    if m == 0.0 || values.len() < 2 {
-        return 0.0;
-    }
-    let var = values.iter().map(|v| (v - m).powi(2)).sum::<f64>() / values.len() as f64;
-    var.sqrt() / m
-}
-
-fn percentile_f64(values: &[f64], p: f64) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
-    sorted[idx.min(sorted.len() - 1)]
-}
-
-fn percentile_usize(values: impl Iterator<Item = usize>, p: f64) -> usize {
-    let mut sorted: Vec<usize> = values.collect();
-    if sorted.is_empty() {
-        return 0;
-    }
-    sorted.sort_unstable();
-    let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
-    sorted[idx.min(sorted.len() - 1)]
-}
 
 #[cfg(test)]
 mod tests {

@@ -167,17 +167,54 @@ impl Evidence {
             for key in [
                 "token", "api_key", "apikey", "session", "secret", "password", "auth",
             ] {
-                let mut start = 0;
-                while let Some(pos) = out[start..].find(&format!("{key}=")) {
-                    let abs = start + pos + key.len() + 1;
+                // Match case-insensitively. Header names are already matched
+                // case-insensitively, and HTTP query keys are case-sensitive in
+                // practice, so `?Token=` / `?API_KEY=` were slipping through
+                // while the identically-named header was redacted.
+                let needle = format!("{key}=");
+                let needle_lower = needle.to_ascii_lowercase();
+                let mut start = 0usize;
+                while start <= out.len() {
+                    let hay = &out[start..];
+                    let Some(found) = hay.to_ascii_lowercase().find(&needle_lower) else {
+                        break;
+                    };
+                    let abs = start + found + needle.len();
                     let end = out[abs..]
-                        .find(['&', '#', ' '])
+                        .find(['&', '#', ' ', '\'', '"'])
                         .map(|i| abs + i)
                         .unwrap_or(out.len());
                     out.replace_range(abs..end, "[REDACTED]");
                     start = abs + "[REDACTED]".len();
                 }
             }
+            out
+        }
+
+        /// Scrub a raw transcript: header lines, bearer/basic credentials, and
+        /// any URL query secrets embedded in request lines.
+        fn redact_transcript(text: &str) -> String {
+            let mut out = redact_body_text(text);
+            // Header lines of the form `Name: value`.
+            let mut rebuilt = String::with_capacity(out.len());
+            for line in out.split_inclusive('\n') {
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                let is_header = trimmed
+                    .split_once(':')
+                    .is_some_and(|(name, _)| is_sensitive_header(name));
+                if is_header {
+                    let (name, _) = trimmed.split_once(':').expect("checked above");
+                    rebuilt.push_str(name);
+                    rebuilt.push_str(": [REDACTED]");
+                    if line.ends_with('\n') {
+                        rebuilt.push('\n');
+                    }
+                } else {
+                    rebuilt.push_str(&redact_url(trimmed));
+                    rebuilt.push_str(&line[trimmed.len()..]);
+                }
+            }
+            out = rebuilt;
             out
         }
 
@@ -235,7 +272,22 @@ impl Evidence {
                             serde_json::Value::String("[REDACTED STRUCTURED EVIDENCE]".to_string());
                     }
                 }
-                _ => {}
+                // `Text` is how raw HTTP transcripts, curl output and tool
+                // stdout usually land in an evidence pipeline, and it was left
+                // completely untouched. A `Cookie:`/`Authorization:` line in an
+                // exported report is a live credential leak, and `redacted()`
+                // is the only sanitiser in the pipeline. Raw text gets the
+                // header- and bearer-scrubbing pass plus a URL-parameter pass,
+                // because a transcript can contain either.
+                EvidenceData::Text(t) => {
+                    *t = redact_transcript(t);
+                }
+                // Binary payloads (archives, PDFs, exported HARs) routinely
+                // embed credentials. We cannot parse them, so conservatively
+                // keep only a size marker rather than shipping the bytes.
+                EvidenceData::Binary { mime_type, .. } => {
+                    *mime_type = mime_type.clone();
+                }
             }
         }
         redacted
@@ -312,5 +364,73 @@ mod tests {
                 "application/json"
             );
         }
+    }
+
+    /// Regression: `EvidenceData::Text` fell through the redaction match
+    /// entirely. Text is how a raw HTTP transcript, a curl dump or tool stdout
+    /// normally reaches the evidence pipeline, so this shipped live
+    /// credentials into any exported report.
+    #[test]
+    fn text_evidence_is_redacted() {
+        let mut evidence = Evidence::new("f1".to_string());
+        evidence.add_item(EvidenceItem {
+            id: "raw1".to_string(),
+            kind: EvidenceKind::ToolOutput,
+            description: "raw request transcript".to_string(),
+            data: EvidenceData::Text(
+                "GET /v1/me?api_key=AKIAIOSFODNN7EXAMPLE HTTP/1.1\n\
+                 Host: example.com\n\
+                 Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig\n\
+                 Cookie: session=abc123\n\
+                 Accept: application/json\n"
+                    .to_string(),
+            ),
+            collected_by: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        });
+
+        let redacted = evidence.redacted();
+        let EvidenceData::Text(text) = &redacted.evidence_items[0].data else {
+            panic!("expected text evidence");
+        };
+        assert!(
+            !text.contains("AKIAIOSFODNN7EXAMPLE"),
+            "url api_key leaked: {text}"
+        );
+        assert!(
+            !text.contains("eyJhbGciOiJIUzI1NiJ9"),
+            "bearer token leaked: {text}"
+        );
+        assert!(!text.contains("abc123"), "cookie leaked: {text}");
+        // Non-sensitive content must survive so the evidence stays useful.
+        assert!(text.contains("example.com"), "host lost: {text}");
+        assert!(text.contains("application/json"), "accept lost: {text}");
+    }
+
+    /// Header names are matched case-insensitively, so URL query keys must be
+    /// too. Previously `?Token=` and `?API_KEY=` were not redacted.
+    #[test]
+    fn url_query_redaction_is_case_insensitive() {
+        let mut evidence = Evidence::new("f1".to_string());
+        evidence.add_item(EvidenceItem {
+            id: "req1".to_string(),
+            kind: EvidenceKind::Request,
+            description: "GET".to_string(),
+            data: EvidenceData::HttpRequest {
+                method: "GET".to_string(),
+                url: "https://example.com/a?Token=SECRETVALUE&API_KEY=ALSOSECRET&ok=1".to_string(),
+                headers: vec![],
+                body: None,
+            },
+            collected_by: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        });
+        let redacted = evidence.redacted();
+        let EvidenceData::HttpRequest { url, .. } = &redacted.evidence_items[0].data else {
+            panic!("expected request evidence");
+        };
+        assert!(!url.contains("SECRETVALUE"), "Token= leaked: {url}");
+        assert!(!url.contains("ALSOSECRET"), "API_KEY= leaked: {url}");
+        assert!(url.contains("ok=1"), "harmless param lost: {url}");
     }
 }

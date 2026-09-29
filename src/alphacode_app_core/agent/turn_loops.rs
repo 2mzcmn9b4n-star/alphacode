@@ -27,6 +27,9 @@ impl Agent {
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         self.set_log_context();
         crate::session_metrics::record_turn(&self.session.id);
+        // Reset the per-turn budget counters; see `run_turn_streaming_mpsc`.
+        self.budget_enforcer
+            .begin_turn(self.goal_contract.as_ref().map(|c| c.phase));
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.
         let _streaming_guard = crate::session::StreamingGuard::new(self.session.id.clone());
@@ -268,6 +271,9 @@ impl Agent {
 
             // Successful API call - reset retry counter
             context_limit_retries = 0;
+            // The model that just served the turn is working, so return it to
+            // service if a previous failure had quarantined it.
+            self.note_free_pool_model_healthy();
 
             logging::info(&format!(
                 "API stream opened in {:.2}s",
@@ -317,28 +323,45 @@ impl Agent {
             // enough to unblock the agent rather than hanging forever.
             const DEAD_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
             let mut last_stream_event = Instant::now();
-            while let Some(event) = stream.next().await {
-                // Dead-stream guard: if the stream has been silent for too
-                // long, break out and surface an error.
-                if last_stream_event.elapsed() > DEAD_STREAM_TIMEOUT {
-                    log_agent_provider_stream_lifecycle(
-                        logging::LogLevel::Error,
-                        self,
-                        "stream_dead_timeout",
-                        api_start,
-                        vec![
-                            ("mode", "blocking".to_string()),
-                            (
-                                "silence_secs",
-                                last_stream_event.elapsed().as_secs().to_string(),
-                            ),
-                        ],
-                    );
-                    return Err(anyhow::anyhow!(
-                        "Provider stream hung: no events received for {}s (dead stream timeout)",
-                        last_stream_event.elapsed().as_secs()
-                    ));
-                }
+            // The guard has to be evaluated on a timer, not after an event.
+            //
+            // The previous `while let Some(event) = stream.next().await` form
+            // could only ever reach the check *after* an event had arrived, at
+            // which point `last_stream_event` had just been refreshed — so the
+            // comparison was always microseconds old and the timeout could
+            // literally never fire. A TCP half-open stream (proxy, NAT idle
+            // timeout, LB eviction) parked this loop forever with no error. The
+            // MPSC path in `turn_streaming_mpsc` already does this correctly
+            // with a `select!` against a keepalive ticker; mirror that here.
+            let mut keepalive = stream_keepalive_ticker();
+            loop {
+                let next_event = std::pin::pin!(stream.next());
+                let event = tokio::select! {
+                    _ = keepalive.tick() => {
+                        if last_stream_event.elapsed() > DEAD_STREAM_TIMEOUT {
+                            log_agent_provider_stream_lifecycle(
+                                logging::LogLevel::Error,
+                                self,
+                                "stream_dead_timeout",
+                                api_start,
+                                vec![
+                                    ("mode", "blocking".to_string()),
+                                    (
+                                        "silence_secs",
+                                        last_stream_event.elapsed().as_secs().to_string(),
+                                    ),
+                                ],
+                            );
+                            return Err(anyhow::anyhow!(
+                                "Provider stream hung: no events received for {}s (dead stream timeout)",
+                                last_stream_event.elapsed().as_secs()
+                            ));
+                        }
+                        continue;
+                    }
+                    event = next_event => event,
+                };
+                let Some(event) = event else { break };
                 last_stream_event = Instant::now();
                 let event = match event {
                     Ok(event) => event,

@@ -45,15 +45,28 @@ Jenkins: localhost:8080  Grafana: localhost:3000
 etcd: localhost:2379     Consul: localhost:8500
 ```
 
-## CHAINS
+## IMPACT DEMONSTRATION (minimum sufficient)
+Prove the fetch crosses the boundary, then stop. The classic sufficient proof
+is a canary you control (a collaborator endpoint / your own server) plus a
+short internal read that returns something non-public but harmless:
+
 ```
-SSRF → cloud metadata → IAM keys → RCE          ($500 → $500K)
-SSRF → Redis → write webshell → RCE              ($1K → $100K)
-SSRF → Docker API → privileged container → escape ($5K → $100K)
-SSRF → K8s API → deploy malicious pod → RCE       ($5K → $100K)
+external URL → normal response          (baseline)
+your canary host → request arrives       (proves server-side fetch)
+127.0.0.1 / internal host → response differs from the generic block page
 ```
 
+**Stop there.** Do not read cloud metadata, do not enumerate internal ports,
+do not write to Redis/etcd, do not deploy a pod. Those are the actions that
+turn an assessment into an incident. Report the blind-SSRF vs
+response-returning distinction, plus whatever one benign internal read you
+used, and let the owner decide the rest.
+
+Severity = what you actually read. "Blind SSRF with egress to internal
+networks" is a complete, honest finding; do not price it as if you had
+exfiltrated credentials.
+
 ## FALSE POSITIVES
-- DNS callback only → need actual internal resource ACCESS
+- DNS callback only → not sufficient on its own; need actual internal ACCESS
 - Server fetches external URLs → normal behavior
 - Timeout on internal → correctly filtered

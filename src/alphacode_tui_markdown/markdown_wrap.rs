@@ -528,7 +528,7 @@ pub fn wrap_lines(
 }
 
 pub fn progress_bar(progress: f32, width: usize) -> String {
-    let filled = (progress * width as f32) as usize;
+    let filled = ((progress.clamp(0.0, 1.0)) * width as f32) as usize;
     let empty = width.saturating_sub(filled);
 
     std::iter::repeat_n('█', filled)
@@ -537,6 +537,7 @@ pub fn progress_bar(progress: f32, width: usize) -> String {
 }
 
 pub fn progress_line(label: &str, progress: f32, width: usize) -> Line<'static> {
+    let progress = progress.clamp(0.0, 1.0);
     let bar = progress_bar(progress, width.saturating_sub(label.len() + 3));
     let pct = (progress * 100.0) as u8;
 

@@ -117,13 +117,22 @@ impl VerifierVerdict {
         alternative_explanations: Vec<String>,
         disproof_attempts: Vec<String>,
     ) -> Self {
+        // A *successful disproof* requires that the verifier actually
+        // reproduced the issue and then found a way to explain it away. The
+        // old expression folded "could not reproduce" into `disproof_successful`
+        // and mapped both to `Contradicted`, which made the
+        // `InsufficientEvidence` arm unreachable — a flaky test or a rate
+        // limit was recorded as a hard refutation, and downstream consumers
+        // treat `Contradicted` as proof the finding is bogus.
         let disproof_successful =
-            !reproduced || !alternative_explanations.is_empty() && disproof_attempts.len() > 2;
+            reproduced && (!alternative_explanations.is_empty() || disproof_attempts.len() > 2);
         let final_verdict = if reproduced && !disproof_successful {
             ArbitrationVerdict::Supported
-        } else if !reproduced || disproof_successful {
+        } else if reproduced {
+            // Reproduced, but explained away -> actively contradicted.
             ArbitrationVerdict::Contradicted
         } else {
+            // Not reproduced: we do not know, which is not the same as false.
             ArbitrationVerdict::InsufficientEvidence
         };
         Self {
@@ -178,6 +187,10 @@ mod tests {
 
     #[test]
     fn verifier_must_reproduce() {
+        // Not reproduced is *unknown*, not disproven. Recording it as
+        // `Contradicted` made a flaky test or a rate limit indistinguishable
+        // from a genuine refutation, and `Contradicted` is consumed as proof
+        // the finding is bogus.
         let v = VerifierVerdict::decide(
             "f1".into(),
             "v1".into(),
@@ -185,8 +198,51 @@ mod tests {
             vec![],
             vec!["tried".into()],
         );
-        assert_eq!(v.final_verdict, ArbitrationVerdict::Contradicted);
+        assert_eq!(v.final_verdict, ArbitrationVerdict::InsufficientEvidence);
+        assert!(
+            !v.disproof_successful,
+            "inability to reproduce is not a successful disproof"
+        );
         let ok = VerifierVerdict::decide("f1".into(), "v1".into(), true, vec![], vec![]);
         assert_eq!(ok.final_verdict, ArbitrationVerdict::Supported);
+
+        // Reproduced but explained away is a real refutation.
+        let explained = VerifierVerdict::decide(
+            "f1".into(),
+            "v1".into(),
+            true,
+            vec!["the endpoint requires an internal network".into()],
+            vec![],
+        );
+        assert!(explained.disproof_successful);
+        assert_eq!(explained.final_verdict, ArbitrationVerdict::Contradicted);
+    }
+
+    /// A reproduced finding survives a *light* disprobe campaign: a couple of
+    /// attempts with no alternative explanation found is still `Supported`.
+    /// Once the verifier has genuinely tried hard (>2 attempts) or found a
+    /// rival explanation, the finding is refuted.
+    #[test]
+    fn reproduced_and_lightly_attacked_is_still_supported() {
+        let light = VerifierVerdict::decide(
+            "f1".into(),
+            "v1".into(),
+            true,
+            vec![],
+            vec!["a".into(), "b".into()],
+        );
+        assert!(!light.disproof_successful);
+        assert_eq!(light.final_verdict, ArbitrationVerdict::Supported);
+
+        // A thorough, unexplained disproof campaign counts as a refutation.
+        let thorough = VerifierVerdict::decide(
+            "f1".into(),
+            "v1".into(),
+            true,
+            vec![],
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+        );
+        assert!(thorough.disproof_successful);
+        assert_eq!(thorough.final_verdict, ArbitrationVerdict::Contradicted);
     }
 }

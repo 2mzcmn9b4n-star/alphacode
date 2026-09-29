@@ -836,7 +836,7 @@ pub fn format_reset_time(timestamp: &str) -> String {
             return "now".to_string();
         }
         if duration.num_seconds() < 60 {
-            return "1m".to_string();
+            return format!("{}s", duration.num_seconds());
         }
         let days = duration.num_days();
         let hours = duration.num_hours() % 24;
@@ -943,6 +943,8 @@ fn truncate_with_ellipsis(input: &str, width: usize) -> String {
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let percent_x = percent_x.min(100);
+    let percent_y = percent_y.min(100);
     let popup = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

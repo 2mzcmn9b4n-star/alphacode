@@ -102,6 +102,12 @@ impl ConsoleLine {
 }
 
 /// Gradient separator line for visual section breaks.
+///
+/// Renders a horizontal rule with a smooth gradient sweep across the
+/// brand palette. The width is capped at 120 cells so the separator
+/// never overflows wide terminals. Consecutive cells with the same
+/// color are merged into a single span to keep the render buffer
+/// compact.
 pub fn gradient_separator(width: usize) -> Line<'static> {
     let gradient = BrandTheme::gradient();
     let total_chars = width.min(120);
@@ -134,6 +140,9 @@ pub fn gradient_separator(width: usize) -> Line<'static> {
 }
 
 /// Linearly interpolate between two colors.
+///
+/// Returns `a` unchanged when it is not an RGB color. When `t` is outside
+/// [0, 1] it is clamped so callers never produce out-of-range components.
 fn blend_colors(a: Color, b: Color, t: f32) -> Color {
     let (r1, g1, b1) = match a {
         Color::Rgb(r, g, b) => (r as f32, g as f32, b as f32),
@@ -143,6 +152,7 @@ fn blend_colors(a: Color, b: Color, t: f32) -> Color {
         Color::Rgb(r, g, b) => (r as f32, g as f32, b as f32),
         _ => return b,
     };
+    let t = t.clamp(0.0, 1.0);
     rgb(
         (r1 + (r2 - r1) * t) as u8,
         (g1 + (g2 - g1) * t) as u8,
@@ -151,9 +161,12 @@ fn blend_colors(a: Color, b: Color, t: f32) -> Color {
 }
 
 /// Professional banner for the application header.
+///
+/// Renders the Alphacode wordmark with a gradient sweep, the version
+/// string, a tagline, and a gradient separator. The separator is capped
+/// at 120 cells so it never overflows wide terminals.
 pub fn app_banner(version: &str, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let _bright = OutputColor::Bright;
     let dim = OutputColor::Dim;
 
     // Gradient wordmark
@@ -191,6 +204,9 @@ pub fn app_banner(version: &str, width: usize) -> Vec<Line<'static>> {
 }
 
 /// Professional section header for console output.
+///
+/// Renders a bold accent title followed by a gradient separator. The
+/// separator width is clamped to the terminal width so it never overflows.
 pub fn section_header(title: &str, width: usize) -> Vec<Line<'static>> {
     vec![
         ConsoleLine::bold(format!("  {} ", title), OutputColor::Accent).into_line(),
@@ -200,12 +216,12 @@ pub fn section_header(title: &str, width: usize) -> Vec<Line<'static>> {
 
 /// Key-value pair display for structured console output.
 pub fn key_value(key: &str, value: &str) -> ConsoleLine {
-    ConsoleLine::new(format!("  {}: {}", key, value), OutputColor::Bright)
+    ConsoleLine::new(format!("  {key}: {value}"), OutputColor::Bright)
 }
 
 /// Key-value pair with highlighted value (e.g. for important settings).
 pub fn key_value_highlighted(key: &str, value: &str, highlight_color: OutputColor) -> ConsoleLine {
-    let content = format!("  {}: {} ", key, value);
+    let content = format!("  {key}: {value} ");
     let mut line = ConsoleLine::new(content, highlight_color);
     line.modifier = Modifier::BOLD;
     line
@@ -213,25 +229,29 @@ pub fn key_value_highlighted(key: &str, value: &str, highlight_color: OutputColo
 
 /// Confirmation badge for successful operations.
 pub fn success_badge(message: &str) -> ConsoleLine {
-    ConsoleLine::bold(format!("  ✓  {}", message), OutputColor::Success)
+    ConsoleLine::bold(format!("  ✓  {message}"), OutputColor::Success)
 }
 
 /// Error badge for failed operations.
 pub fn error_badge(message: &str) -> ConsoleLine {
-    ConsoleLine::bold(format!("  ✖  {}", message), OutputColor::Error)
+    ConsoleLine::bold(format!("  ✖  {message}"), OutputColor::Error)
 }
 
 /// Warning badge for non-fatal issues.
 pub fn warning_badge(message: &str) -> ConsoleLine {
-    ConsoleLine::bold(format!("  ⚠  {}", message), OutputColor::Warning)
+    ConsoleLine::bold(format!("  ⚠  {message}"), OutputColor::Warning)
 }
 
 /// Info badge for informational messages.
 pub fn info_badge(message: &str) -> ConsoleLine {
-    ConsoleLine::bold(format!("  i  {}", message), OutputColor::Info)
+    ConsoleLine::bold(format!("  i  {message}"), OutputColor::Info)
 }
 
 /// Provider/model info card for console display.
+///
+/// The status string is matched against known states to pick a semantic
+/// color: green for active/ready/online, red for error/offline/unavailable,
+/// and blue for everything else.
 pub fn provider_info_card(provider: &str, model: &str, status: &str) -> Vec<Line<'static>> {
     let status_color = match status {
         "active" | "ready" | "online" => OutputColor::Success,
@@ -240,13 +260,17 @@ pub fn provider_info_card(provider: &str, model: &str, status: &str) -> Vec<Line
     };
 
     vec![
-        ConsoleLine::bold(format!("  Provider: {}", provider), OutputColor::Accent).into_line(),
-        ConsoleLine::new(format!("  Model:    {}", model), OutputColor::Bright).into_line(),
-        ConsoleLine::bold(format!("  Status:   {}", status), status_color).into_line(),
+        ConsoleLine::bold(format!("  Provider: {provider}"), OutputColor::Accent).into_line(),
+        ConsoleLine::new(format!("  Model:    {model}"), OutputColor::Bright).into_line(),
+        ConsoleLine::bold(format!("  Status:   {status}"), status_color).into_line(),
     ]
 }
 
 /// Session statistics card.
+///
+/// Renders a compact statistics block with turn count, token counts,
+/// elapsed time, and an output-ratio indicator. The ratio line is only
+/// shown when at least one token has been processed.
 pub fn session_stats_card(
     turn_count: u64,
     input_tokens: u64,
@@ -257,18 +281,18 @@ pub fn session_stats_card(
 
     lines.push(ConsoleLine::bold("  Session Statistics", OutputColor::Accent).into_line());
     lines.push(
-        ConsoleLine::new(format!("  Turns:     {}", turn_count), OutputColor::Bright).into_line(),
+        ConsoleLine::new(format!("  Turns:     {turn_count}"), OutputColor::Bright).into_line(),
     );
     lines.push(
         ConsoleLine::new(
-            format!("  Input:     {} tokens", input_tokens),
+            format!("  Input:     {input_tokens} tokens"),
             OutputColor::Bright,
         )
         .into_line(),
     );
     lines.push(
         ConsoleLine::new(
-            format!("  Output:    {} tokens", output_tokens),
+            format!("  Output:    {output_tokens} tokens"),
             OutputColor::Bright,
         )
         .into_line(),
@@ -277,14 +301,14 @@ pub fn session_stats_card(
     if let Some(elapsed) = elapsed {
         let secs = elapsed.as_secs();
         let time_str = if secs < 60 {
-            format!("{}s", secs)
+            format!("{secs}s")
         } else if secs < 3600 {
             format!("{}m {}s", secs / 60, secs % 60)
         } else {
             format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
         };
         lines.push(
-            ConsoleLine::new(format!("  Elapsed:   {}", time_str), OutputColor::Bright).into_line(),
+            ConsoleLine::new(format!("  Elapsed:   {time_str}"), OutputColor::Bright).into_line(),
         );
     }
 
@@ -303,7 +327,7 @@ pub fn session_stats_card(
             OutputColor::Warning
         };
         lines.push(
-            ConsoleLine::new(format!("  Ratio:     {:.1}% output", ratio), ratio_color).into_line(),
+            ConsoleLine::new(format!("  Ratio:     {ratio:.1}% output"), ratio_color).into_line(),
         );
     }
 
@@ -311,7 +335,11 @@ pub fn session_stats_card(
 }
 
 /// Progress bar for long-running operations.
+///
+/// The progress value is clamped to [0, 1] so callers never produce
+/// out-of-range bars. The percentage label is always shown, even at 0%.
 pub fn progress_bar(label: &str, progress: f32, width: usize) -> ConsoleLine {
+    let progress = progress.clamp(0.0, 1.0);
     let filled = (progress * width as f32).round() as usize;
     let empty = width.saturating_sub(filled);
     let bar = format!(
@@ -331,6 +359,11 @@ pub fn progress_bar(label: &str, progress: f32, width: usize) -> ConsoleLine {
 }
 
 /// Elapsed time formatter.
+///
+/// Produces a compact, human-readable duration string:
+/// - Sub-second durations show milliseconds (`50ms`, `1.234s`)
+/// - Minutes and hours are shown without trailing zero seconds
+/// - Zero duration returns `"0ms"` (not an empty string)
 pub fn format_elapsed(duration: Duration) -> String {
     let secs = duration.as_secs();
     let ms = duration.subsec_millis();
@@ -345,16 +378,33 @@ pub fn format_elapsed(duration: Duration) -> String {
             format!("{}.{:03}s", secs, ms)
         }
     } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
+        let m = secs / 60;
+        let s = secs % 60;
+        if s == 0 {
+            format!("{m}m")
+        } else {
+            format!("{m}m {s}s")
+        }
     } else {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h {m}m")
+        }
     }
 }
 
 /// Token count formatter with units.
+///
+/// Produces compact, human-readable token counts:
+/// - `500tok` for counts under 1 000
+/// - `1.5ktok` for counts under 1 000 000
+/// - `1.5Mtok` for counts 1 000 000 and above
 pub fn format_tokens(tokens: u64) -> String {
     if tokens < 1000 {
-        format!("{}tok", tokens)
+        format!("{tokens}tok")
     } else if tokens < 1_000_000 {
         format!("{:.1}ktok", tokens as f64 / 1000.0)
     } else {
@@ -363,6 +413,9 @@ pub fn format_tokens(tokens: u64) -> String {
 }
 
 /// Terminal width adapter for responsive console output.
+///
+/// Clamps `width` to the range `[20, max_width]` so console output never
+/// collapses to an unreadable sliver or overflows the terminal.
 pub fn adapt_width(width: usize, max_width: usize) -> usize {
     width.min(max_width).max(20)
 }
@@ -412,6 +465,10 @@ pub mod status {
     use super::*;
 
     /// Render a professional status line with left, center, and right sections.
+    ///
+    /// The center section is padded to fill the remaining width between the
+    /// left and right sections. When the terminal is too narrow to fit all
+    /// three sections, the center is dropped first, then the right section.
     pub fn render_bar(
         left: &[Span<'static>],
         center: &[Span<'static>],
@@ -444,6 +501,9 @@ pub mod status {
     }
 
     /// Render a simple single-section status line.
+    ///
+    /// Pads the content with trailing spaces to fill the terminal width.
+    /// When the content already exceeds the width it is returned unchanged.
     pub fn render_simple(content: &[Span<'static>], width: u16) -> Line<'static> {
         let content_w: usize = content
             .iter()
@@ -464,6 +524,10 @@ pub mod table {
     use super::*;
 
     /// Render a table with headers, rows, and column widths.
+    ///
+    /// Each cell is truncated with an ellipsis when it exceeds the column
+    /// width. The header row is rendered in the accent color with bold
+    /// weight; body rows use the default style.
     pub fn render(headers: &[&str], rows: &[Vec<&str>], widths: &[usize]) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
@@ -490,7 +554,6 @@ pub mod table {
         } else {
             Style::default()
         };
-        let _suffix_style = Style::default();
 
         for (i, cell) in cells.iter().enumerate() {
             let w = widths.get(i).copied().unwrap_or(15);
@@ -525,8 +588,13 @@ pub mod progress {
     use super::*;
 
     /// Render a progress bar as styled spans with gradient fill.
+    ///
+    /// The progress value is clamped to [0, 1]. The filled portion uses a
+    /// gradient sweep; the empty portion uses the dim color. A percentage
+    /// label and optional trailing label are always shown.
     pub fn render(label: &str, progress: f32, width: usize, frame: usize) -> Line<'static> {
-        let filled = (progress.clamp(0.0, 1.0) * width as f32).round() as usize;
+        let progress = progress.clamp(0.0, 1.0);
+        let filled = (progress * width as f32).round() as usize;
         let empty = width.saturating_sub(filled);
         let gradient = BrandTheme::gradient();
 
@@ -578,7 +646,7 @@ pub mod progress {
         // Label
         if !label.is_empty() {
             spans.push(Span::styled(
-                format!(" {}", label),
+                format!(" {label}"),
                 Style::default().fg(BrandTheme::dim_bright()),
             ));
         }

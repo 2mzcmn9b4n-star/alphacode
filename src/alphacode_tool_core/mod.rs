@@ -128,6 +128,68 @@ impl ToolContext {
             path.to_path_buf()
         }
     }
+
+    /// Resolve `path` and prove it stays inside a protected location.
+    ///
+    /// [`Self::resolve_path`] is a *purely lexical* join: it does not collapse
+    /// `..`, does not resolve symlinks, and does not check containment. Handing
+    /// its output straight to `fs::write` meant
+    /// `write("..\\..\\..\\..\\.ssh\\authorized_keys")` reached
+    /// `C:\Users\<user>\.ssh\authorized_keys`. Only the two patch tools consulted
+    /// `is_catastrophic_target`; `write` / `edit` / `multiedit` / `read` / `ls`
+    /// had no path check at all, and the sole mitigation was prose in the tool
+    /// description asking the model to behave.
+    ///
+    /// The check here is mechanical, and there are two independent parts
+    /// because either alone is insufficient:
+    ///
+    /// 1. **Catastrophic targets are refused outright** — the same policy the
+    ///    patch tools already apply, now applied consistently.
+    /// 2. **Symlinks are resolved before the check.** Canonicalizing only the
+    ///    deepest *existing* ancestor and re-appending the not-yet-created tail
+    ///    means a symlink inside the working directory that points at
+    ///    `~/.ssh` or `C:\Windows` is caught; a purely lexical check cannot see
+    ///    it. This is why canonicalization cannot simply be skipped for paths
+    ///    that do not exist yet, which is the normal case for `write`.
+    pub fn resolve_path_guarded(&self, path: &Path) -> anyhow::Result<PathBuf> {
+        let joined = self.resolve_path(path);
+
+        // Resolve the deepest existing ancestor so a symlinked parent is
+        // followed, then re-attach the segments that do not exist yet.
+        let mut existing: &Path = joined.as_path();
+        let mut tail: Vec<std::ffi::OsString> = Vec::new();
+        while !existing.exists() {
+            match (existing.file_name(), existing.parent()) {
+                (Some(name), Some(parent)) => {
+                    tail.push(name.to_os_string());
+                    existing = parent;
+                }
+                // Reached the filesystem root without finding anything that
+                // exists; use what we have.
+                _ => break,
+            }
+        }
+        let real = existing
+            .canonicalize()
+            .unwrap_or_else(|_| existing.to_path_buf());
+        let mut resolved = real;
+        for segment in tail.into_iter().rev() {
+            resolved.push(segment);
+        }
+
+        let risk_ctx =
+            crate::alphacode_command_risk::RiskContext::from_env(self.working_dir.clone());
+        if crate::alphacode_command_risk::is_catastrophic_target(&resolved, &risk_ctx) {
+            anyhow::bail!(
+                "Refusing to touch {:?}: it resolves to {}, which is a protected \
+                 system, credential, or home path. Writing outside the project \
+                 is not permitted.",
+                path.display(),
+                resolved.display()
+            );
+        }
+        Ok(resolved)
+    }
 }
 
 /// A tool that can be executed by the agent.

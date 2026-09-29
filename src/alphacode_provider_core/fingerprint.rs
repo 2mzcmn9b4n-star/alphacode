@@ -30,10 +30,25 @@ pub fn stable_hash_json<T: Serialize + ?Sized>(value: &T) -> u64 {
     stable_hash_str(&encoded)
 }
 
-fn stable_json_len<T: Serialize + ?Sized>(value: &T) -> usize {
-    serde_json::to_string(value)
-        .map(|encoded| encoded.len())
-        .unwrap_or_default()
+/// Hash and encoded length of `value`, from a single serialization.
+///
+/// This exists because the obvious spelling of the two answers we need is
+/// `stable_hash_json(v)` plus `stable_json_len(v)`, and each of those runs its
+/// own `serde_json::to_string`. On this code path `v` is a whole provider
+/// request — the message array plus every tool schema — so asking for both
+/// answers serialized it twice, on every API call, for every provider, purely
+/// to fill two diagnostic fields. Both answers come from the same bytes.
+///
+/// Falls back exactly as the pair did: a serialization error hashes the empty
+/// string and reports a length of zero.
+fn hash_and_len<T: Serialize + ?Sized>(value: &T) -> (u64, usize) {
+    match serde_json::to_string(value) {
+        Ok(encoded) => {
+            let len = encoded.len();
+            (stable_hash_str(&encoded), len)
+        }
+        Err(_) => (stable_hash_str(""), 0),
+    }
 }
 
 fn item_hashes(items: &[Value]) -> Vec<u64> {
@@ -73,15 +88,24 @@ pub fn log_provider_canonical_input(
     tool_count: Option<usize>,
     extra_fields: &[(&str, String)],
 ) {
-    let request_hash = stable_hash_json(payload);
-    let request_json_chars = stable_json_len(payload);
+    let (request_hash, request_json_chars) = hash_and_len(payload);
     let item_hashes = item_hashes(items);
     let item_hashes_hash = stable_hash_json(&item_hashes);
     let input_hash = stable_hash_json(items);
-    let system_hash = system.map(stable_hash_json);
-    let system_json_chars = system.map(stable_json_len);
-    let tools_hash = tools.map(stable_hash_json);
-    let tools_json_chars = tools.map(stable_json_len);
+    let (system_hash, system_json_chars) = match system {
+        Some(system) => {
+            let (hash, len) = hash_and_len(system);
+            (Some(hash), Some(len))
+        }
+        None => (None, None),
+    };
+    let (tools_hash, tools_json_chars) = match tools {
+        Some(tools) => {
+            let (hash, len) = hash_and_len(tools);
+            (Some(hash), Some(len))
+        }
+        None => (None, None),
+    };
     let first_item_hash = item_hashes.first().copied();
     let last_item_hash = item_hashes.last().copied();
 

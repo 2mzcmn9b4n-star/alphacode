@@ -571,7 +571,14 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("gemini-2.0-flash-lite");
         }
         "alphax-free" => {
-            push("kilo-auto/free");
+            // The full rotation pool, not just the default. The live catalog is
+            // disabled for this profile (the gateway's `/v1/models` returns 394
+            // mostly-paid rows), so this static list is the only thing that
+            // makes the free models knowable — both for `/model` and for
+            // automatic 429 rotation.
+            for model in crate::alphacode_provider_metadata::CURATED_FREE_MODELS {
+                push(model);
+            }
         }
         _ => {}
     }
@@ -597,6 +604,17 @@ pub fn openai_compatible_profile_static_context_limits(
 pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) -> Option<usize> {
     let profile_id = profile_id.trim().to_ascii_lowercase();
     let model = model.trim().to_ascii_lowercase();
+
+    // Alphax Free rotation moves a live conversation between free models whose
+    // windows differ by 16x (65K to 1M), and this profile's live catalog is
+    // disabled so nothing upstream can correct a wrong answer. The verified
+    // per-model table has to win, before the generic family classifier, or
+    // compaction would be budgeted against a window the new model does not have.
+    if profile_id == crate::alphacode_provider_metadata::ALPHAX_FREE_PROFILE_ID
+        && let Some(limit) = crate::alphacode_provider_metadata::free_model_context_limit(&model)
+    {
+        return Some(limit);
+    }
 
     match profile_id.as_str() {
         // DeepSeek V4 direct API models advertise a 1M token context window. The
@@ -666,8 +684,11 @@ fn apply_openai_compatible_profile_env_impl(
         crate::alphacode_core::env::set_var("ALPHACODE_OPENROUTER_PROVIDER_FEATURES", "0");
         // Profiles like alphax-free use a virtual model ID (kilo-auto/free) that
         // only exists on their gateway. Their /v1/models returns unrelated paid
-        // models. Disable the live model catalog for these profiles.
-        let disable_model_catalog = profile.id == "alphax-free";
+        // models. Disable the live model catalog for these profiles — the free
+        // rotation pool is served from the curated static list instead, and
+        // refreshed separately (and only for its price filter).
+        let disable_model_catalog =
+            profile.id == crate::alphacode_provider_metadata::ALPHAX_FREE_PROFILE_ID;
         crate::alphacode_core::env::set_var(
             "ALPHACODE_OPENROUTER_MODEL_CATALOG",
             if disable_model_catalog { "0" } else { "1" },

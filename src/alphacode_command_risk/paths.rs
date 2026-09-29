@@ -58,6 +58,76 @@ const SYSTEM_PATHS_PROTECTED_RECURSIVELY: &[&str] = &[
     "/var/lib", "/System", "/Library",
 ];
 
+/// Windows system roots, in the several spellings a shell can produce.
+///
+/// These are matched as *prefixes* (see [`matches_protected`]), so each entry
+/// means "this directory and everything under it". `c:/users` is deliberately
+/// kept out of this list and handled by [`WINDOWS_USERS_ROOT`] below, which
+/// exempts the working directory.
+///
+/// The set is applied to *every* drive letter, not just `c:` — see
+/// [`is_windows_system_root`].
+const PROTECTED_WINDOWS_PATHS: &[&str] = &[
+    "c:/",
+    "c:/windows",
+    "c:/windows/system32",
+    "c:/program files",
+    "c:/program files (x86)",
+    "c:/programdata",
+];
+
+/// `C:\Users` — protected as a prefix, *except* inside the working directory.
+///
+/// A prefix rule here is over-broad on a default Windows install: the standard
+/// layout is `C:\Users\<name>\...\<repo>`, so `rm -f main.rs` and `rm -rf
+/// target` inside the repository the agent was working in both start with
+/// `c:/users` and were classified catastrophic. That made the agent unable to
+/// delete a single file in its own project. A project directory is not a system
+/// path, so the working directory is exempted; every other profile, plus
+/// `Public` and `Default`, stays protected, and the user's own home directory
+/// and the credential stores beneath it are covered separately further down.
+/// This mirrors how the POSIX lists deliberately exclude `/Users` and `/home`
+/// from their recursive set.
+const WINDOWS_USERS_ROOT: &str = "c:/users";
+
+/// If `comparable` begins with a single-letter drive root (`d:/`), return the
+/// remainder with no leading slash; otherwise `None`.
+fn drive_relative_tail(comparable: &str) -> Option<&str> {
+    let bytes = comparable.as_bytes();
+    if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+        return None;
+    }
+    let rest = &comparable[2..];
+    Some(rest.strip_prefix('/').unwrap_or(rest))
+}
+
+/// Whether `comparable` is a Windows system root on *any* drive.
+///
+/// The literal `c:`-rooted lists are not drive-agnostic, which meant `rm -rf
+/// D:\` and `format d:` were only "outside the working directory" — and so were
+/// allowed — while `rm -rf C:\` was catastrophic. A drive letter is just the
+/// first path component, so recognise the shape instead of enumerating letters.
+fn is_windows_system_root(comparable: &str) -> bool {
+    matches!(
+        drive_relative_tail(comparable),
+        Some(
+            "" | "windows"
+                | "windows/system32"
+                | "program files"
+                | "program files (x86)"
+                | "programdata"
+        )
+    )
+}
+
+/// Windows paths whose *contents* are as sensitive as the directory.
+const WINDOWS_PATHS_PROTECTED_RECURSIVELY: &[&str] = &[
+    "c:/windows",
+    "c:/program files",
+    "c:/program files (x86)",
+    "c:/programdata",
+];
+
 /// The set of paths this policy protects, exposed for testing and docs.
 pub struct ProtectedPaths;
 
@@ -86,7 +156,28 @@ pub fn expand(raw: &str, ctx: &RiskContext) -> PathBuf {
     if let Some(home) = &ctx.home_dir {
         let home_str = home.to_string_lossy().to_string();
         // Order matters: replace the longer forms first.
-        for var in ["${HOME}", "$HOME"] {
+        //
+        // Only the home-indirection variables are resolved. These are the
+        // spellings under which every supported shell names the user's home
+        // directory, and all of them reach the same place:
+        //
+        //   $HOME / ${HOME}          POSIX sh, Git Bash
+        //   $USERPROFILE             Git Bash, MSYS on Windows
+        //   ${USERPROFILE}           braced form of the above
+        //   $env:USERPROFILE         PowerShell
+        //   %USERPROFILE%            cmd.exe
+        //
+        // Resolving them here is what lets `rm -rf $USERPROFILE` be *checked*
+        // rather than waved through as an opaque substitution — the expanded
+        // form lands in `is_catastrophic_target` and is denied.
+        for var in [
+            "${HOME}",
+            "$HOME",
+            "${USERPROFILE}",
+            "$USERPROFILE",
+            "$env:USERPROFILE",
+            "%USERPROFILE%",
+        ] {
             text = text.replace(var, &home_str);
         }
         if text == "~" {
@@ -99,6 +190,33 @@ pub fn expand(raw: &str, ctx: &RiskContext) -> PathBuf {
     let path = PathBuf::from(&text);
     if path.is_absolute() {
         return normalize(&path);
+    }
+    // On Windows a rooted path with no drive (`/etc/passwd`, `/c/Users/me`,
+    // `/dev/sda`) is NOT `is_absolute()`, so it used to be joined onto the
+    // working directory — which made every POSIX-style path look like an
+    // ordinary in-project file and sail through as merely `Confirm`. The
+    // bash tool schema explicitly tells the model to prefer forward slashes,
+    // and Git Bash / MSYS / WSL shells all address the system drive that way,
+    // so these spellings are exactly what we must understand.
+    if text.starts_with('/') {
+        // `/c/Users/...` is the Git-Bash mount of the system drive; map it to
+        // `C:/Users/...` so it compares against the protected Windows set.
+        let rest = text.trim_start_matches('/');
+        if cfg!(windows) {
+            let mut chars = rest.chars();
+            if let (Some(drive), Some('/')) = (chars.next(), chars.next())
+                && drive.is_ascii_alphabetic()
+            {
+                let mapped = format!("{drive}:/{}", &rest[drive.len_utf8() + 1..]);
+                return normalize(&PathBuf::from(mapped));
+            }
+        }
+        // Any other rooted path is treated as absolute at the filesystem root.
+        return normalize(&PathBuf::from(if cfg!(windows) {
+            format!("\\{text}")
+        } else {
+            text.clone()
+        }));
     }
     match &ctx.working_dir {
         Some(cwd) => normalize(&cwd.join(path)),
@@ -128,6 +246,48 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Reduce a path to a canonical, comparable, lowercase form.
+///
+/// Three separate problems are solved here:
+/// * **Separator** — `C:\Windows` and `C:/Windows` must compare equal.
+/// * **Case** — Windows and macOS filesystems are case-insensitive, so
+///   `C:/windows` and `C:/Windows` are the same directory.
+/// * **Drive-letter mounting** — Git Bash, MSYS and WSL-style shells address
+///   the system drive as `/c/...`. Without mapping that onto `c:/...`, the
+///   protected-path list never matches and `rm -rf /c/Users/<me>` is allowed
+///   on the one platform where it deletes the whole home directory.
+fn normalize_for_compare(path: &Path) -> String {
+    let mut s = path.to_string_lossy().replace('\\', "/");
+    while s.contains("//") {
+        s = s.replace("//", "/");
+    }
+    // `/c/Users/...` -> `c:/Users/...`
+    if s.len() >= 3 {
+        let bytes = s.as_bytes();
+        if bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b'/' {
+            s = format!("{}:{}", &s[1..2], &s[2..]);
+        }
+    }
+    if s.len() == 2 && s.ends_with(':') {
+        // Bare drive root: `c:` -> `c:/`
+        s.push('/');
+    }
+    // Strip a trailing slash so `c:/windows/` == `c:/windows`, but keep `c:/`.
+    if s.len() > 3 && s.ends_with('/') {
+        while s.len() > 3 && s.ends_with('/') {
+            s.pop();
+        }
+    }
+    s.to_lowercase()
+}
+
+/// Whether `path` is equal to, or inside, the protected entry `prefix`
+/// (compared via [`normalize_for_compare`]).
+fn matches_protected(path: &str, prefix: &str) -> bool {
+    let prefix = normalize_for_compare(Path::new(prefix));
+    path == prefix || path.starts_with(&format!("{prefix}/"))
+}
+
 /// Whether destroying this path is categorically unacceptable.
 ///
 /// Exposed separately because this is the single most important predicate in
@@ -141,6 +301,35 @@ pub fn is_catastrophic_target(path: &Path, ctx: &RiskContext) -> bool {
     // every `cmd > /dev/null`.
     if is_safe_device_sink(&path) {
         return false;
+    }
+
+    // Windows system roots. Checked with normalized comparison so every
+    // spelling of the same directory is caught.
+    let comparable = normalize_for_compare(&path);
+
+    // Is the target the working directory, or inside it? Used only to scope the
+    // `C:\Users` exemption below.
+    let inside_working_dir = ctx.working_dir.as_ref().is_some_and(|dir| {
+        let cwd = normalize_for_compare(&normalize(dir));
+        comparable == cwd || comparable.starts_with(&format!("{cwd}/"))
+    });
+
+    if PROTECTED_WINDOWS_PATHS
+        .iter()
+        .any(|p| matches_protected(&comparable, p))
+        || (matches_protected(&comparable, WINDOWS_USERS_ROOT) && !inside_working_dir)
+    {
+        return true;
+    }
+    // The same system roots on every other drive; see `is_windows_system_root`.
+    if is_windows_system_root(&comparable) {
+        return true;
+    }
+    if WINDOWS_PATHS_PROTECTED_RECURSIVELY
+        .iter()
+        .any(|p| matches_protected(&comparable, p))
+    {
+        return true;
     }
 
     // Exact system roots, plus anything inside the ones whose contents are as
@@ -189,15 +378,19 @@ pub fn classify_target(
     // Glob and variable expansion we did not perform: we cannot know the
     // footprint, so escalate rather than guess.
     if raw.contains('*') || raw.contains('?') {
-        // A bare `/*` or `~/*` is catastrophic in effect even though no single
-        // resolved path is protected.
+        // A glob whose parent directory is protected is catastrophic by
+        // construction: a glob can only match entries *inside* its parent, so
+        // `~/.ssh/id_*` destroys private keys exactly as `~/.ssh/*` does. The
+        // old code additionally required the glob to be the whole final
+        // component (`file_name() == "*"`), which meant `rm -rf ~/.ssh/id_*`
+        // fell through to the much weaker Confirm tier — and Confirm is
+        // allowed to run.
         if let Some(parent_of_glob) = expanded.parent()
             && is_catastrophic_target(parent_of_glob, ctx)
-            && expanded.file_name().is_some_and(|n| n == "*")
         {
             return Some(RiskFinding {
                 level: RiskLevel::Catastrophic,
-                reason: "would destroy the entire contents of a protected directory".to_string(),
+                reason: "would destroy the contents of a protected directory".to_string(),
                 target: Some(raw.to_string()),
             });
         }
@@ -223,7 +416,13 @@ pub fn classify_target(
         });
     }
 
-    if raw.contains('$') || raw.contains('`') {
+    // `%` is cmd.exe's expansion sigil and must be caught here, or
+    // `rm -rf %USERPROFILE%` looks like an ordinary relative filename: it
+    // expands to `<cwd>\%USERPROFILE%`, sits inside the working directory, and
+    // was classified `Low` and allowed — while the shell deleted the home
+    // directory. The finding it produced also named a path that was never
+    // touched, so the report was affirmatively wrong, not merely unhelpful.
+    if raw.contains('$') || raw.contains('`') || raw.contains('%') {
         return Some(RiskFinding {
             level: RiskLevel::Confirm,
             reason: "target is computed at runtime (variable or command \

@@ -147,6 +147,9 @@ impl PermissionsApp {
     }
 
     fn render_list(&self, frame: &mut Frame, area: Rect) {
+        if area.height == 0 {
+            return;
+        }
         let now = Utc::now();
         let mut lines: Vec<Line> = Vec::new();
 

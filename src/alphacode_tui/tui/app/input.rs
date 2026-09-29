@@ -1298,6 +1298,20 @@ pub(super) fn handle_prompt_history_navigation(
         return false;
     }
 
+    // An unmodified arrow on an empty composer means "move the view", not
+    // "recall a prompt". The composer is empty for essentially the whole time
+    // the agent is working, so without this the transcript could not be
+    // scrolled with the arrow keys at all during a turn: history recall
+    // consumed the keystroke and returned before the scroll handler ran.
+    //
+    // Deliberately narrow: it only applies to an empty composer. With a draft
+    // in progress the arrow keys keep walking history, and every explicit
+    // recall chord (Ctrl / Alt / Cmd + Up/Down, handled by the caller above)
+    // keeps working unchanged.
+    if modifiers.is_empty() && app.input.is_empty() && app.chat_can_scroll(code == KeyCode::Up) {
+        return false;
+    }
+
     let history = visible_prompt_history(app);
     if history.is_empty() {
         return false;

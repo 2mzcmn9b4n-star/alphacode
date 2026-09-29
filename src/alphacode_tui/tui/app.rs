@@ -111,6 +111,7 @@ mod tui_state;
 mod turn;
 mod turn_memory;
 mod turn_notify;
+mod ui_polish;
 mod ui_prefs;
 
 pub(crate) use self::state_ui_storage::compact_display_messages_for_storage;
@@ -1528,7 +1529,16 @@ pub struct App {
     // Stashed input: saved via Ctrl+S for later retrieval
     stashed_input: Option<(String, usize)>,
     // Undo history for in-progress input editing (Ctrl+Z)
-    input_undo_stack: Vec<(String, usize)>,
+    //
+    // Oldest-first ring: `Vec` with `remove(0)` shifted all remaining entries
+    // on every keystroke once the stack was full, which is exactly the case
+    // that happens constantly during sustained typing. `VecDeque::pop_front`
+    // is O(1) and leaves the remaining snapshots where they are.
+    input_undo_stack: std::collections::VecDeque<(String, usize)>,
+    // Running total of `input_undo_stack` text capacity, kept incrementally so
+    // eviction does not need a full re-summation on every keystroke and so
+    // `debug_profile` can report it in O(1).
+    input_undo_stack_bytes: usize,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
     // Distinct learned-keybinding nudge ("you keep doing X the slow way, press
@@ -1794,6 +1804,18 @@ impl App {
     /// a dead credential.
     const CREDENTIAL_FAILURE_BREAKER_THRESHOLD: u32 = 3;
     const INPUT_UNDO_LIMIT: usize = 128;
+    /// Total composer text the undo history may retain.
+    ///
+    /// `INPUT_UNDO_LIMIT` bounds the *number* of snapshots, but every snapshot
+    /// is a full copy of the composer, so a count limit alone does not bound
+    /// memory. A single large paste followed by 128 keystrokes would retain 128
+    /// copies of that paste: at the 3 MB submit cap that is ~384 MB of undo
+    /// history for a single draft, retained for as long as the composer is open.
+    ///
+    /// Evicting oldest-first under a byte budget keeps ordinary typing (where
+    /// snapshots are tens of bytes) at the full 128 levels of history, and caps
+    /// the pathological case at a bounded, still-usable amount.
+    const INPUT_UNDO_MAX_BYTES: usize = 8 * 1024 * 1024;
     const CLIENT_FOCUS_RECORD_DEBOUNCE: Duration = Duration::from_secs(2);
     const KV_CACHE_OPTIMAL_OK_PCT: u8 = 85;
     const KV_CACHE_MIN_MISSED_TOKENS: u64 = 1_024;

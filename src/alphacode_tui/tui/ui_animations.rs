@@ -299,11 +299,9 @@ pub(crate) fn idle_donut_reserved_height(show_donut: bool, input_height: u16) ->
     }
 }
 /// Public entry point used by the rest of the TUI: remember the animated
-/// Public entry point used by the rest of the TUI: remember the animated
 /// rectangle, then render the decoration into the frame.
 pub(super) fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     // Remember the animated rows so the run loop can repaint only them between
-    // full frames. Sizes the animation rejects are recorded as "no animation".
     // full frames. Sizes the animation rejects are recorded as "no animation".
     record_idle_animation_area((area.width >= 4 && area.height >= 2).then_some(area));
     render_idle_animation(frame.buffer_mut(), area, app.animation_elapsed());
@@ -320,7 +318,6 @@ pub(crate) fn render_idle_animation(buf: &mut Buffer, area: Rect, elapsed: f32) 
     // in many terminals, so the default is now a single line of theme-tinted
     // text that does not move.
     let variant = idle_animation_variant();
-    eprintln!("PROBE render_idle_animation variant={variant} area={area:?} elapsed={elapsed}");
     if variant == "static_logo" {
         render_idle_wordmark(buf, area);
         return;

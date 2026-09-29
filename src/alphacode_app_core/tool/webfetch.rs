@@ -27,29 +27,178 @@ const USER_AGENTS: &[&str] = &[
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
 ];
 
-/// Check if a hostname resolves to an RFC 1918 private IP range.
+/// Parse the IP literal spellings a resolver will accept, or `None` if the
+/// host is a real name.
+///
+/// The SSRF guard used to `split('.')` and bail out on anything that was not
+/// exactly four dotted decimal octets, which meant every alternative spelling
+/// the OS happily connects to was classified "public":
+///
+/// * `127.1`            (short form)
+/// * `0x7f.0.0.1`      (hex octets)
+/// * `2130706433`       (whole 32-bit value)
+/// * `0177.0.0.1`       (octal octets)
+/// * `::ffff:127.0.0.1` (IPv4-mapped IPv6)
+/// * `127.0.0.1.nip.io` (a name that resolves to loopback — caught by the
+///   string checks, but only for known suffixes)
+///
+/// Returns the parsed address so the range checks below apply to the real
+/// value rather than the textual form.
+fn parse_ip_literal(host: &str) -> Option<std::net::IpAddr> {
+    let h = host.trim();
+    if h.is_empty() {
+        return None;
+    }
+    // Bracketed IPv6, e.g. `[::1]`.
+    let unbracketed = h
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(h);
+
+    // Anything containing a letter that is not a hex digit (`example.com`)
+    // is a name, not an IP literal. Hex IPv6 and hex octets still get through.
+    if let Ok(addr) = unbracketed.parse::<std::net::IpAddr>() {
+        return Some(addr);
+    }
+    parse_legacy_dotted(unbracketed)
+}
+
+/// Parse the pre-IPv6 numeric forms: `a`, `a.b`, `a.b.c`, `a.b.c.d`, each part
+/// decimal / hex (`0x..`) / octal (leading `0`).
+fn parse_legacy_dotted(s: &str) -> Option<std::net::IpAddr> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut nums: Vec<u32> = Vec::with_capacity(parts.len());
+    for p in &parts {
+        nums.push(parse_octet(p)?);
+    }
+    // `inet_aton(3)` semantics: the trailing part absorbs all remaining bytes,
+    // big-endian. So `127.1` is `127.0.0.1`, not a right-aligned fill. Getting
+    // this wrong matters — a mis-parsed loopback literal would be classified
+    // "public" and let an SSRF straight through.
+    let octets = match nums.len() {
+        // Whole 32-bit value: `2130706433` == 127.0.0.1
+        1 => {
+            // `parse_octet` already yields `u32`, and both of its parsers
+            // (`u32::from_str_radix(..).ok()` and `parse::<u32>()`) return
+            // `None` on overflow, which the caller propagates with `?`. So
+            // every element of `nums` fits in 32 bits by construction and an
+            // explicit range check here can never fire.
+            nums[0].to_be_bytes()
+        }
+        2 => {
+            let (a, b) = (nums[0], nums[1]);
+            if a > 0xFF || b > 0x00FF_FFFF {
+                return None;
+            }
+            [a as u8, (b >> 16) as u8, (b >> 8) as u8, b as u8]
+        }
+        3 => {
+            let (a, b, c) = (nums[0], nums[1], nums[2]);
+            if a > 0xFF || b > 0xFF || c > 0xFFFF {
+                return None;
+            }
+            [a as u8, b as u8, (c >> 8) as u8, c as u8]
+        }
+        _ => {
+            let (a, b, c, d) = (nums[0], nums[1], nums[2], nums[3]);
+            if a > 0xFF || b > 0xFF || c > 0xFF || d > 0xFF {
+                return None;
+            }
+            [a as u8, b as u8, c as u8, d as u8]
+        }
+    };
+    Some(std::net::IpAddr::V4(std::net::Ipv4Addr::from(octets)))
+}
+
+fn parse_octet(p: &str) -> Option<u32> {
+    if p.is_empty() {
+        return None;
+    }
+    let lower = p.to_ascii_lowercase();
+    if let Some(hex) = lower.strip_prefix("0x") {
+        return u32::from_str_radix(hex, 16).ok();
+    }
+    if lower.len() > 1 && lower.starts_with('0') && lower.chars().all(|c| c.is_ascii_digit()) {
+        return u32::from_str_radix(&lower[1..], 8).ok();
+    }
+    lower.parse::<u32>().ok()
+}
+
+/// Whether an address is loopback, private, link-local, or unspecified —
+/// anything that must never be reachable from a user-supplied URL.
+fn is_non_public_addr(addr: std::net::IpAddr) -> bool {
+    match addr {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                // 169.254.0.0/16 is covered by is_link_local, but AWS/GCP
+                // metadata lives at 169.254.169.254 specifically.
+                || v4.octets()[0] == 169
+                && v4.octets()[1] == 254
+                // Carrier-grade NAT 100.64.0.0/10
+                || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1]))
+                // 0.0.0.0/8 "this network"
+                || v4.octets()[0] == 0
+                // 240.0.0.0/4 reserved, incl. 255.255.255.255
+                || v4.octets()[0] >= 240
+                // Shared address space 100.64/10 handled above; benchmarking
+                // 198.18.0.0/15
+                || (v4.octets()[0] == 198 && (18..=19).contains(&v4.octets()[1]))
+        }
+        std::net::IpAddr::V6(v6) => {
+            // Unwrap IPv4-mapped/compatible so ::ffff:127.0.0.1 is judged as
+            // the IPv4 loopback it is.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_non_public_addr(std::net::IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // Unique local fc00::/7
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // Link-local fe80::/10
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Check if a hostname resolves to a private/internal IP range.
 /// Used for SSRF protection to prevent fetching internal network resources.
 fn is_private_ip(host: &str) -> bool {
-    // Parse first octet for quick range checks
-    let parts: Vec<&str> = host.split('.').collect();
-    if parts.len() != 4 {
-        return false;
+    match parse_ip_literal(host) {
+        Some(addr) => is_non_public_addr(addr),
+        // Not an IP literal: a real hostname. Whether it is dangerous depends
+        // on what it resolves to, which the caller checks separately.
+        None => false,
     }
-    let octets: Vec<u8> = parts.iter().filter_map(|p| p.parse().ok()).collect();
-    if octets.len() != 4 {
-        return false;
+}
+
+/// Resolve a hostname to every address the system would connect to.
+///
+/// Returns `None` when resolution fails, so the caller can proceed rather
+/// than treating a transient DNS error as a security verdict. Runs on
+/// `tokio::spawn_blocking` because the resolver is blocking.
+async fn resolve_all(host: &str) -> Option<Vec<std::net::IpAddr>> {
+    let host = host.trim().to_string();
+    if host.is_empty() {
+        return None;
     }
-    match octets[0] {
-        // 10.0.0.0/8
-        10 => true,
-        // 172.16.0.0/12
-        172 if (16..=31).contains(&octets[1]) => true,
-        // 192.168.0.0/16
-        192 if octets[1] == 168 => true,
-        // 169.254.0.0/16 (link-local)
-        169 if octets[1] == 254 => true,
-        _ => false,
-    }
+    tokio::task::spawn_blocking(move || {
+        use std::net::ToSocketAddrs;
+        match (host.as_str(), 0u16).to_socket_addrs() {
+            Ok(iter) => {
+                let addrs: Vec<std::net::IpAddr> = iter.map(|a| a.ip()).collect();
+                (!addrs.is_empty()).then_some(addrs)
+            }
+            Err(_) => None,
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Returns `true` when `body` looks like an anti-bot challenge page rather
@@ -214,9 +363,30 @@ impl Tool for WebFetchTool {
                      Refusing SSRF request."
                 ));
             }
+
+            // Resolve the name and check every address it maps to. The
+            // literal check above cannot see `internal.corp.example` or
+            // `127.0.0.1.nip.io`, both of which resolve to loopback and both
+            // of which the resolver connects to without complaint. Checking
+            // the *string* only was the gap that made the guard decorative.
+            if let Some(addrs) = resolve_all(host).await {
+                for addr in &addrs {
+                    if is_non_public_addr(*addr) {
+                        return Err(anyhow::anyhow!(
+                            "Blocked: `{host}` resolves to {addr}, an internal/private \
+                             address. Refusing SSRF request."
+                        ));
+                    }
+                }
+            }
         }
 
-        let timeout = params.timeout.unwrap_or(DEFAULT_TIMEOUT).min(MAX_TIMEOUT);
+        // `0` means "unset", not "expire immediately": `Some(0).min(MAX)`
+        // yields a zero Duration and every request fails at once.
+        let timeout = match params.timeout {
+            Some(0) | None => DEFAULT_TIMEOUT,
+            Some(n) => n.min(MAX_TIMEOUT),
+        };
         let format = params.format.as_deref().unwrap_or("markdown");
         let method = params.method.as_deref().unwrap_or("GET").to_uppercase();
 
@@ -794,5 +964,75 @@ mod tests {
         let (out, truncated) = truncate_output(long);
         assert!(truncated);
         assert!(out.chars().all(|c| c == 'é'));
+    }
+
+    /// Regression: the SSRF guard only understood four-part dotted-decimal
+    /// literals and returned "public" for everything else, so all of these
+    /// — which the OS resolver connects to without complaint — reached
+    /// internal services and the cloud metadata endpoint.
+    #[test]
+    fn ssrf_guard_catches_alternate_ip_spellings() {
+        for internal in [
+            "127.0.0.1",
+            "127.1",              // short form
+            "127.0.1",            // 3-part
+            "0x7f.0.0.1",         // hex octets
+            "0x7f.1",             // hex + short
+            "2130706433",         // whole 32-bit value
+            "0177.0.0.1",         // octal octets
+            "[::1]",              // bracketed IPv6 loopback
+            "::1",                // bare IPv6 loopback
+            "[::ffff:127.0.0.1]", // IPv4-mapped IPv6
+            "0.0.0.0",            // this-network
+            "169.254.169.254",    // AWS/GCP metadata
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "100.64.0.1", // CGNAT
+            "255.255.255.255",
+        ] {
+            assert!(is_private_ip(internal), "SSRF guard missed `{internal}`");
+        }
+    }
+
+    #[test]
+    fn ssrf_guard_does_not_block_real_public_hosts() {
+        // A guard that blocks everything is as useless as one that blocks
+        // nothing — it just trains the caller to route around it.
+        for public in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "93.184.216.34",
+            "172.32.0.1", // just outside 172.16/12
+            "172.15.255.255",
+            "11.0.0.1",
+        ] {
+            assert!(
+                !is_private_ip(public),
+                "false positive on public address `{public}`"
+            );
+        }
+        // Real hostnames are not literals, so the literal check must not fire
+        // on them; the resolve-and-check pass handles those.
+        for name in ["example.com", "api.github.com"] {
+            assert!(!is_private_ip(name), "false positive on `{name}`");
+        }
+    }
+
+    #[test]
+    fn legacy_ip_parsing_matches_the_right_addresses() {
+        assert_eq!(
+            parse_ip_literal("127.1"),
+            Some("127.0.0.1".parse().unwrap())
+        );
+        assert_eq!(
+            parse_ip_literal("2130706433"),
+            Some("127.0.0.1".parse().unwrap())
+        );
+        assert_eq!(
+            parse_ip_literal("0x7f.0.0.1"),
+            Some("127.0.0.1".parse().unwrap())
+        );
+        assert_eq!(parse_ip_literal("example.com"), None);
     }
 }

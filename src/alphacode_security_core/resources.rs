@@ -102,6 +102,14 @@ impl ResourceLedger {
         if self.agent_budget > 0 {
             ratios.push(self.agents_spawned as f32 / self.agent_budget as f32);
         }
+        // Wall clock is a real budget dimension (`exhausted` checks it) and
+        // it is the one most likely to be the binding constraint near the end
+        // of a run, so it must contribute to `pressure` too. Omitting it made
+        // the pressure-tightened thresholds in `should_stop` inert exactly
+        // when a run was about to time out.
+        if self.wall_clock_budget_secs > 0 {
+            ratios.push(self.wall_clock_secs as f32 / self.wall_clock_budget_secs as f32);
+        }
         ratios.into_iter().fold(0.0, f32::max).clamp(0.0, 1.0)
     }
 }
@@ -128,7 +136,12 @@ pub fn should_stop(
     let pressure = ledger.pressure();
     let threshold = 0.15 + pressure * 0.4;
     let net = expected_info_gain - expected_cost * 0.5;
-    if net < threshold && expected_info_gain < 0.25 {
+    // Either disjunct alone is enough to stop: `net` covers the "too expensive
+    // for what it returns" case, and the raw-gain floor covers the "returns
+    // almost nothing regardless of price" case. Using `&&` here meant cost
+    // could never *independently* trigger a stop, so any action with a gain
+    // >= 0.25 continued no matter what it cost.
+    if net < threshold || expected_info_gain < 0.25 {
         return TerminationState::LowValue;
     }
     TerminationState::Continue

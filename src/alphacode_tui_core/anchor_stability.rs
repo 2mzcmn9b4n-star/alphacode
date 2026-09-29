@@ -410,10 +410,10 @@ fn align_frames(prev: &[u64], cur: &[u64]) -> AnchorDiff {
     let cur_unique = unique_nonblank_hashes(cur);
 
     // Offset votes from rows unique in both frames.
-    let mut votes: HashMap<i32, usize> = HashMap::new();
+    let mut votes: HashMap<isize, usize> = HashMap::new();
     for (h, prev_idx) in &prev_unique {
         if let Some(cur_idx) = cur_unique.get(h) {
-            let offset = *cur_idx as i32 - *prev_idx as i32;
+            let offset = *cur_idx as isize - *prev_idx as isize;
             *votes.entry(offset).or_insert(0) += 1;
         }
     }
@@ -421,7 +421,7 @@ fn align_frames(prev: &[u64], cur: &[u64]) -> AnchorDiff {
     let dominant_shift = votes
         .iter()
         .max_by_key(|(offset, count)| (**count, std::cmp::Reverse(offset.unsigned_abs())))
-        .map(|(offset, _)| *offset)
+        .map(|(offset, _)| *offset as i32)
         .unwrap_or(0);
 
     let mut diff = AnchorDiff {
@@ -437,7 +437,7 @@ fn align_frames(prev: &[u64], cur: &[u64]) -> AnchorDiff {
         if *h == BLANK_ROW_HASH {
             continue;
         }
-        let dominant_target = prev_idx as i32 + dominant_shift;
+        let dominant_target = prev_idx as isize + dominant_shift as isize;
         let at_dominant = dominant_target >= 0
             && (dominant_target as usize) < cur.len()
             && cur[dominant_target as usize] == *h;
@@ -456,10 +456,11 @@ fn align_frames(prev: &[u64], cur: &[u64]) -> AnchorDiff {
         if prev_unique.contains_key(h)
             && let Some(cur_idx) = cur_unique.get(h)
         {
-            let offset = *cur_idx as i32 - prev_idx as i32;
-            if offset == 0 && dominant_shift != 0 {
+            let offset = *cur_idx as isize - prev_idx as isize;
+            let shift = dominant_shift as isize;
+            if offset == 0 && shift != 0 {
                 diff.stationary_rows += 1;
-            } else if (offset - dominant_shift).abs() <= SLIDE_TOLERANCE {
+            } else if (offset - shift).abs() <= SLIDE_TOLERANCE as isize {
                 diff.sliding_rows += 1;
             } else {
                 diff.displaced_rows += 1;

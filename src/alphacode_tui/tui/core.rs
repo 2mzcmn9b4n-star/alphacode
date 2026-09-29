@@ -21,7 +21,7 @@ pub fn prev_char_boundary(s: &str, pos: usize) -> usize {
 /// Find the byte offset of the next character boundary after `pos`.
 /// Returns `s.len()` if already at or past the end.
 pub fn next_char_boundary(s: &str, pos: usize) -> usize {
-    let mut p = pos + 1;
+    let mut p = pos.saturating_add(1);
     while p < s.len() && !s.is_char_boundary(p) {
         p += 1;
     }

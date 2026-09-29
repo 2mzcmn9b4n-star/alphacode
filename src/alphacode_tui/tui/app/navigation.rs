@@ -1586,6 +1586,62 @@ impl App {
         }
     }
 
+    /// Whether the transcript has content to reveal in the given direction.
+    ///
+    /// Used to decide whether an *unmodified* arrow key should move the
+    /// viewport or be treated as prompt-history navigation. The composer is
+    /// empty for most of a turn (and always empty while the agent works), and
+    /// history recall was unconditionally winning there, so an unmodified `Up`
+    /// never reached the scroll handler at all: pressing it dropped the last
+    /// prompt into the composer instead of moving the view.
+    pub(super) fn chat_can_scroll(&self, up: bool) -> bool {
+        // A settling history prepend is driven by the anchor, so motion is
+        // always available in both directions while it is pending.
+        if self.pending_history_anchor.is_some() {
+            return true;
+        }
+        // Deliberately the renderer's published extent, not
+        // `scroll_max_estimate()`. The estimate is an upper bound chosen to
+        // keep a scrolling *offset* sane, and its no-layout fallback is
+        // `messages * 100`; asking it "can the view move right now?" would
+        // answer yes for a transcript that has never been rendered or that
+        // fits on screen. `last_max_scroll` is the exact extent of the last
+        // frame, and is 0 when there is genuinely nothing to scroll to.
+        let rendered_max = super::super::ui::last_max_scroll();
+        if up {
+            return rendered_max > 0;
+        }
+        // Downward scrolling is only meaningful while paused above the bottom;
+        // pinned to the bottom, `Up` is the only direction with somewhere to go.
+        self.auto_scroll_paused
+            && self.scroll_offset < self.chat_scroll_ceiling(self.scroll_max_estimate())
+    }
+
+    /// Largest absolute scroll offset the transcript can currently show, given
+    /// the best available estimate of its extent (`max`).
+    ///
+    /// The renderer's exact extent is authoritative only once it has caught up
+    /// with the transcript. While the agent is streaming, `last_max_scroll`
+    /// trails text that has already been appended but not yet rendered, so
+    /// treating it as a hard ceiling pins a reader who scrolls up to the bottom
+    /// of the frame they can currently see: the keystroke is absorbed and the
+    /// viewport does not move at all. This is why `scroll_down` only trusts
+    /// `rendered_max` when it is non-zero *and* the transcript is quiescent,
+    /// and why `scroll_up` has to use the same rule rather than clamping
+    /// unconditionally.
+    fn chat_scroll_ceiling(&self, max: usize) -> usize {
+        let rendered_max = super::super::ui::last_max_scroll();
+        if rendered_max == 0 {
+            return max;
+        }
+        if self.is_processing || !self.streaming.streaming_text.is_empty() {
+            // Streaming: the renderer's ceiling is behind the real content, so
+            // prefer the live estimate and let the next frame catch up.
+            return max;
+        }
+        rendered_max.min(max)
+    }
+
     /// Scroll the chat transcript up by `amount` lines.
     ///
     /// Returns `true` if the stored scroll position actually changed. Callers
@@ -1623,22 +1679,12 @@ impl App {
         let before = (self.scroll_offset, self.auto_scroll_paused);
         let max = self.scroll_max_estimate();
         if !self.auto_scroll_paused {
-            let rendered_max = super::super::ui::last_max_scroll();
             let current_abs = max.saturating_sub(self.scroll_offset);
             self.scroll_offset = current_abs.saturating_sub(amount);
-            // Clamp to the renderer's authoritative ceiling so we never store
-            // a scroll position past the largest line the renderer can show.
-            // The cap is `rendered_max`, not `rendered_max - amount`: the
-            // `amount` was already consumed above when computing the new
-            // absolute offset, and subtracting it again would over-shoot the
-            // cap and make the first scroll-up from the bottom jump many
-            // screens instead of moving by `amount` lines.
-            if rendered_max > 0 {
-                self.scroll_offset = self.scroll_offset.min(rendered_max);
-            }
         } else {
             self.scroll_offset = self.scroll_offset.saturating_sub(amount);
         }
+        self.scroll_offset = self.scroll_offset.min(self.chat_scroll_ceiling(max));
         self.auto_scroll_paused = true;
         // If the upward scroll bottomed out against the top of the currently
         // loaded content, fold the unsatisfied intent into the prefetch as

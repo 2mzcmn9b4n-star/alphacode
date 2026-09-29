@@ -48,17 +48,11 @@ fn extract_write_input(input: &Value) -> Result<WriteInput, anyhow::Error> {
         .iter()
         .find_map(|k| obj.get(*k).and_then(|v| v.as_str()))
         .ok_or_else(|| {
-            let mut keys: Vec<&String> = obj.keys().collect();
-            keys.sort();
-            let keys = keys
-                .iter()
-                .map(|k| format!("`{k}`"))
-                .collect::<Vec<_>>()
-                .join(", ");
             anyhow::anyhow!(
-                "missing field `file_path`. Received keys: {keys}. \
+                "missing field `file_path`. {}. \
                  Provide the destination as `file_path`, e.g. \
-                 {{\"file_path\": \"/path/to/file\", \"content\": \"...\"}}"
+                 {{\"file_path\": \"/path/to/file\", \"content\": \"...\"}}",
+                super::describe_received_arguments(input)
             )
         })?;
     let content = ["content", "text", "data", "body", "file_content"]
@@ -113,7 +107,7 @@ impl Tool for WriteTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: WriteInput = extract_write_input(&input)?;
 
-        let path = ctx.resolve_path(Path::new(&params.file_path));
+        let path = ctx.resolve_path_guarded(Path::new(&params.file_path))?;
 
         // Create parent directories if needed
         if let Some(parent) = path.parent()

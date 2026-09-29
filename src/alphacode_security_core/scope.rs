@@ -303,9 +303,16 @@ impl LiveScope {
     }
 
     /// Update scope verdict for a hostname.
+    ///
+    /// Re-marking a host back in scope clears the sticky `out_of_scope` set,
+    /// otherwise a host that was provisionally excluded and later confirmed
+    /// in-scope would stay blocked forever and the two structures would
+    /// permanently disagree.
     pub fn set_verdict(&mut self, hostname: String, verdict: ScopeVerdict) {
         if matches!(verdict, ScopeVerdict::OutOfScope { .. }) {
             self.out_of_scope.insert(hostname.clone());
+        } else {
+            self.out_of_scope.remove(&hostname);
         }
         self.scope_verdicts.insert(hostname, verdict);
     }

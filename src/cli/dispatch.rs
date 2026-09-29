@@ -371,7 +371,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             commands::run_cloud_command(map_cloud_subcommand(subcmd))?;
         }
         Some(Command::Plugin(subcmd)) => {
-            commands::run_plugin_command(subcmd)?;
+            commands::run_plugin_command(subcmd).await?;
         }
         Some(Command::Pair { list, revoke }) => {
             commands::run_pair_command(list, revoke)?;
@@ -482,6 +482,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 );
                 print_provider_test_coverage_report(&report, colorize);
             }
+        }
+        Some(Command::BugBounty { command }) => {
+            crate::cli::commands::run_bugbounty_command(&command).await?;
         }
         Some(Command::ProviderDoctor {
             provider,

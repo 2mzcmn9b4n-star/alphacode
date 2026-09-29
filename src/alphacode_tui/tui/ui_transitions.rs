@@ -69,7 +69,7 @@ pub fn ease_in_out_cubic(t: f32) -> f32 {
 /// Elastic ease-out: overshoots then settles. Good for bounce-in effects.
 pub fn ease_out_elastic(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    if t == 0.0 || t == 1.0 {
+    if t.abs() < f32::EPSILON || (t - 1.0).abs() < f32::EPSILON {
         return t;
     }
     let p = 0.3;

@@ -88,6 +88,44 @@ jobs:
       - run: cargo test --lib --locked
       - run: cargo test --test llamacpp_compat --locked
 
+  perf-gates:
+    name: perf gates
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux system deps
+        run: |
+          sudo apt-get update
+          # See the build job: libxkbcommon is a hard link-time dep on Linux.
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+          components: clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-perf-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+            cargo-
+      # Release profile: the budgets and the scaling curves are only
+      # meaningful against the build that ships. `--test-threads=1` because the
+      # gates compare timings and must not contend with each other.
+      #
+      # These fail on hardware-independent complexity regressions only. The
+      # wall-clock budgets inside the suite are reported but not enforced on a
+      # shared runner; see the module docs in tests/perf_gates.rs for why
+      # enforcing them in CI would produce flaky, unactionable failures.
+      - run: >
+          cargo test --release --locked --test perf_gates
+          -- --nocapture --test-threads=1
+
   lint:
     name: clippy
     runs-on: ubuntu-latest

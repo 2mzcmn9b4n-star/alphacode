@@ -1,9 +1,13 @@
 use super::{Tool, ToolContext, ToolOutput};
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+
+/// Time limit handed to gau (`-t`), in seconds. Always applied: gau polls
+/// several third-party archives and has no useful default.
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 pub struct GauTool;
 
@@ -80,43 +84,48 @@ impl Tool for GauTool {
 
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: GauInput = serde_json::from_value(input)?;
-        let args = build_args(&params);
+        let args = build_args(&params)?;
 
-        let output = tokio::process::Command::new("gau")
-            .args(&args)
-            .output()
-            .await
-            .with_context(|| {
-                "gau not found. Install it: go install github.com/lc/gau/v2/cmd/gau@latest"
-                    .to_string()
-            })?;
+        let output = super::recon_common::run_bounded(
+            "gau",
+            &args,
+            super::recon_common::DEFAULT_TOOL_TIMEOUT,
+        )
+        .await
+        .map_err(|e| {
+            if e.starts_with("failed to run") {
+                anyhow::anyhow!("{e}. {}", super::recon_common::install_hint("gau"))
+            } else {
+                anyhow::anyhow!("{e}")
+            }
+        })?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("gau exited with error: {stderr}"));
+            return Err(anyhow::anyhow!(
+                "{}",
+                super::recon_common::describe_failure("gau", &output)
+            ));
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let urls: Vec<String> = stdout
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.trim().to_string())
-            .collect();
+        let (urls, total, truncated) = super::recon_common::parse_lines(&output.stdout);
 
-        let mut result = format!("gau found {} URLs for {}:\n\n", urls.len(), params.domain);
+        let mut result = format!("gau found {total} URLs for {}:\n\n", params.domain);
 
         for url in &urls {
             result.push_str(url);
             result.push('\n');
         }
+        result.push_str(&super::recon_common::truncation_notice(urls.len(), total));
 
         let mut metadata = HashMap::new();
         metadata.insert("domain".to_string(), json!(params.domain));
         metadata.insert("count".to_string(), json!(urls.len()));
+        metadata.insert("total_found".to_string(), json!(total));
+        metadata.insert("truncated".to_string(), json!(truncated));
         metadata.insert("threads".to_string(), json!(params.threads.unwrap_or(1)));
 
         Ok(ToolOutput::new(result)
-            .with_title(format!("gau: {} URLs found", urls.len()))
+            .with_title(format!("gau: {total} URLs found"))
             .with_metadata(json!(metadata)))
     }
 }
@@ -127,9 +136,10 @@ impl GauTool {
     }
 }
 
-fn build_args(params: &GauInput) -> Vec<String> {
+fn build_args(params: &GauInput) -> Result<Vec<String>> {
+    let domain = super::recon_common::validate_hostname(&params.domain)?;
+
     let mut args = Vec::new();
-    args.push(params.domain.clone());
 
     if let Some(threads) = params.threads {
         args.push("-threads".to_string());
@@ -151,12 +161,20 @@ fn build_args(params: &GauInput) -> Vec<String> {
     if params.s.unwrap_or(false) {
         args.push("-s".to_string());
     }
-    if let Some(t) = params.t {
-        args.push("-t".to_string());
-        args.push(t.to_string());
-    }
+    // Always send a time limit. gau queries several third-party archives, and
+    // without `-t` it can wait indefinitely on a slow provider — previously
+    // the schema advertised a 30s default that was never actually applied,
+    // because the flag was only emitted when the caller passed it.
+    args.push("-t".to_string());
+    args.push(params.t.unwrap_or(DEFAULT_TIMEOUT_SECS).to_string());
 
-    args
+    // `--` so the positional domain can never be parsed as a flag. A domain of
+    // `-t` previously switched gau into time-limit mode and reported a
+    // successful scan of nothing.
+    args.push("--".to_string());
+    args.push(domain);
+
+    Ok(args)
 }
 
 #[cfg(test)]
@@ -175,7 +193,7 @@ mod tests {
             s: None,
             t: None,
         };
-        let args = build_args(&input);
+        let args = build_args(&input).expect("build_args");
         assert!(args.contains(&"example.com".to_string()));
     }
 }

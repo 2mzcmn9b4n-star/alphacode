@@ -143,16 +143,17 @@ pub(crate) fn looks_like_line_oriented_transcript_line(line: &str) -> bool {
 
 pub(crate) fn preserve_line_oriented_softbreaks(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let lines: Vec<&str> = text.split('\n').collect();
     let mut in_code_fence = false;
     let mut fence_char = '\0';
     let mut fence_len = 0usize;
 
-    for (idx, line) in lines.iter().enumerate() {
-        let prev_line = idx.checked_sub(1).map(|prev| lines[prev]);
+    let mut lines = text.split('\n').peekable();
+    let mut prev_line: Option<&str> = None;
+    while let Some(line) = lines.next() {
+        let next_line = lines.peek().copied();
         let prev_log_like = prev_line.is_some_and(looks_like_line_oriented_transcript_line);
         let next_log_like =
-            idx + 1 < lines.len() && looks_like_line_oriented_transcript_line(lines[idx + 1]);
+            next_line.is_some_and(looks_like_line_oriented_transcript_line);
         let line_log_like = looks_like_line_oriented_transcript_line(line);
         let entering_log_block = !in_code_fence
             && line_log_like
@@ -161,8 +162,7 @@ pub(crate) fn preserve_line_oriented_softbreaks(text: &str) -> String {
         let leaving_log_block = !in_code_fence
             && line_log_like
             && !next_log_like
-            && idx + 1 < lines.len()
-            && !lines[idx + 1].trim().is_empty();
+            && next_line.is_some_and(|next| !next.trim().is_empty());
         let preserve_softbreak = !in_code_fence && line_log_like && next_log_like;
 
         if entering_log_block && !out.ends_with("\n\n") {
@@ -170,7 +170,7 @@ pub(crate) fn preserve_line_oriented_softbreaks(text: &str) -> String {
         }
 
         out.push_str(line);
-        if idx + 1 < lines.len() {
+        if next_line.is_some() {
             if preserve_softbreak && !line.ends_with("  ") {
                 out.push_str("  ");
             }
@@ -186,11 +186,13 @@ pub(crate) fn preserve_line_oriented_softbreaks(text: &str) -> String {
                 fence_char = '\0';
                 fence_len = 0;
             }
-        } else if let Some((marker, min_len)) = parse_opening_fence(line) {
+        } else if let Some((ch, len)) = parse_opening_fence(line) {
             in_code_fence = true;
-            fence_char = marker;
-            fence_len = min_len;
+            fence_char = ch;
+            fence_len = len;
         }
+
+        prev_line = Some(line);
     }
 
     out

@@ -35,9 +35,22 @@ Unicode: https://evil.com％00.target.com
 Open redirect chain: target.com/redirect?url=target.com/redirect?url=evil.com
 ```
 
-## CHAINS
+## SEVERITY AND COMPOUND RISK
+An open redirect is only serious when the *origin matters* — a trusted brand
+or auth domain. Judge it that way:
+
 ```
-Open redirect → OAuth redirect_uri abuse → ATO → Critical ($200 → $50K)
-Open redirect → phishing → credential theft → High ($200 → $10K)
-Open redirect → JWT token leak via referrer → High ($200 → $10K)
+example.com/redirect → evil.com        → Low on its own
+login.example.com/redirect → evil.com  → Medium (phishing surface)
+OAuth redirect_uri accepts it          → High — and it needs its own test
 ```
+
+Prove the redirect with a single request and stop. Do **not** build an OAuth
+`redirect_uri` abuse chain, register an attacker app, or attempt to capture a
+real token to justify a higher severity — that is account-takeover testing,
+not redirect testing, and it is a separate scope decision. Note the OAuth
+angle as a compound-risk line for the owner to chase.
+
+Rejected at Gate 6: redirects that land on a warning interstitial, are
+limited to a same-site allowlist, or require an authenticated flow the program
+excludes. Those are the control working.

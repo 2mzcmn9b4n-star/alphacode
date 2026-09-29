@@ -1,141 +1,121 @@
-//! Browser automation tool.
+//! Browser automation tool (Firefox + the bundled AlphaCode Browser Agent
+//! extension).
 //!
-//! # Notes on this refactor (read before merging)
+//! # Bridge contract
 //!
-//! This file was rewritten against the same external surface as the
-//! original: `super::{Tool, ToolContext, ToolOutput}` and the
-//! `crate::browser::*` helpers. I do not have access to your actual
-//! `crate::browser` module or the native-messaging bridge binary, so I
-//! could not compile or run this. Everything below compiles against the
-//! *signatures implied by the original file*; I've kept every external
-//! call shape-identical to before (`ensure_browser_ready_noninteractive`,
-//! `ensure_browser_setup`, `browser_binary_path`, `ensure_browser_session`)
-//! so no changes are needed on that side. Bridge wire names below were
-//! verified against the bundled AlphaCode-Browser-Agent-1.6.0.xpi: `back`/
-//! `forward` (not goBack/goForward), `drag` (not dragAndDrop, params
-//! `source`/`target`), and singular cookie actions `listCookies`/
-//! `setCookie`/`removeCookie` (no batch set — `set_cookies` fans out to one
-//! call per cookie).
+//! Every wire action name and parameter key below was verified against the
+//! bundled `AlphaCode-Browser-Agent-1.6.1.xpi` (`background.js` = the
+//! tab/native side, `content.js` = the page side). Several are *not* the
+//! obvious guess, and a wrong guess fails at runtime as a bridge-side
+//! validation error rather than a compile error, so re-verify this table
+//! whenever the embedded XPI is bumped.
 //!
-//! ## Merge note
-//! Your agent independently edited the same original file and landed three
-//! changes on top of it before I saw them: (a) `navigate` as a literal
-//! match arm for `open` (I'd already fixed the same underlying bug a
-//! different way, via `normalize_action` before dispatch — kept mine since
-//! it also covers `status`/`setup` normalization for free, and removed the
-//! now-redundant literal arm), (b) a structured parse of `list_cookies`
-//! instead of returning the raw `document.cookie` string, which I've kept
-//! and folded into the new `get_cookies`/`list_cookies` split below, and
-//! (c) `enrich_browser_error`, a genuinely good addition that turns common
-//! JS eval failures (top-level await on an old bridge, unescaped regex
-//! parens, calling `.text()` on the wrong thing, syntax errors) into
-//! actionable hints. I ported that in as-is (see `enrich_browser_error`
-//! near `execute_firefox_action`) and extended its patterns slightly to
-//! also cover the new `press`/`select`/`drag_and_drop` error paths added
-//! below.
+//! | tool action | bridge action | notes |
+//! |---|---|---|
+//! | `list_tabs` | `listTabs` | |
+//! | `new_tab` | `newSession` | alias of `createTab`; returns a flat `summarizeTab` |
+//! | `select_tab` | `setActiveTab` | requires `tabId`; focuses the window unless `focus: false` |
+//! | `get_active_tab` | `getActiveTab` | |
+//! | `list_frames` | `listFrames` | |
+//! | `open` | `navigate` | `newTab` creates a *background* tab (`active: focus === true`) |
+//! | `reload` | `reload` | |
+//! | `go_back` / `go_forward` | `back` / `forward` | **not** `goBack`/`goForward` |
+//! | `close_tab` | `closeTab` | |
+//! | `snapshot` | `getContent` + `format: annotated` | |
+//! | `get_content` | `getContent` | length cap key is `maxChars` (`textMaxChars` for annotated), **not** `maxLength` |
+//! | `interactables` | `getInteractables` | |
+//! | `click` / `hover` / `type` | same names | `selector`, `text`, or `x`+`y` all resolve through `resolveElement` |
+//! | `fill_form` / `select` | `fillForm` | `<select>` fields route to `selectOption` (`value` / `values`) |
+//! | `drag_and_drop` | `drag` | params are `source`/`target`, **not** `sourceSelector`/`targetSelector` |
+//! | `wait` | `waitFor` / `waitForStable` | `waitFor` has no quiet-period mode; `waitForStable` is a separate action |
+//! | `screenshot` | `screenshot` | returns `dataUrl`; there is **no** `filename` param and **no** `saved` result |
+//! | `eval` | `evaluate` | `pageWorld: true` runs in the page's own JS world |
+//! | `scroll` | `scroll` | `scrollTo: {x, y}`, `position`, `behavior` |
+//! | `upload` | `uploadFile` | needs base64 `files: [{name, type, data}]`; **no** `filePath` |
+//! | `press` | `press` | native key handling: real value mutation, Tab/Escape/Enter, `form.requestSubmit()` |
+//! | `get_cookies` | `listCookies` | singular cookie actions only; there is no batch `setCookies` |
+//! | `set_cookies` | `setCookie` | fanned out, one call per cookie |
+//! | `delete_cookie` | `removeCookie` | needs a `url`; `cookies.remove` matches on it |
+//! | `list_cookies` | `evaluate` | legacy `document.cookie`; cannot see HttpOnly |
 //!
-//! ## Bugs fixed from the original
-//! 1. **`press` never actually typed anything.** It dispatched keydown/
-//!    keypress/keyup but never mutated `value` or fired an `input` event,
-//!    so React/Vue-controlled inputs (which listen to `input`, not raw key
-//!    events) never saw the keystroke. Now it optionally inserts the
-//!    character at the cursor and fires a proper `input` event, matching
-//!    how browsers actually behave, and it only synthesizes text insertion
-//!    for printable single characters — control keys (Enter, Tab, Escape,
-//!    arrows, Backspace) go through pure keyboard-event dispatch plus
-//!    minimal native-like handling (Backspace/Delete actually remove text,
-//!    Enter still submits forms).
-//! 2. **`select` couldn't do multi-select.** `fields` only ever carried one
-//!    `{selector, value}` pair built from `text`/`value`; there was no way
-//!    to select multiple `<option>`s in a `multiple` select. Added a
-//!    `values: Vec<String>` input field; when present it's forwarded as
-//!    `values` in the bridge params and the fallback eval path (see #7)
-//!    selects all matching options.
-//! 3. **Screenshot temp files could collide and could leak on error.**
-//!    The old path was `millis-since-epoch.png` — two calls in the same
-//!    millisecond collide, and if `firefox_run_bridge_command` returned an
-//!    error the temp file was never scheduled for cleanup (it's never
-//!    created in the error case, so no leak there, but if the bridge wrote
-//!    the file and *then* something after failed, nothing removed it).
-//!    Now uses a PID + counter + timestamp for uniqueness and always
-//!    attempts cleanup in a `finally`-style guard via a drop-guard struct,
-//!    even on early return.
-//! 4. **No retry on transient bridge failures.** A single flaky spawn
-//!    (e.g. native messaging host momentarily busy) would fail the whole
-//!    call. Added a small bounded retry (2 attempts, short backoff) around
-//!    the actual command execution, but only for actions that are safe to
-//!    retry (idempotent reads: status, list_tabs, get_content,
-//!    interactables, snapshot, list_frames, get_active_tab) — never for
-//!    click/type/press/upload/eval, where retrying could double-submit a
-//!    form or double-click a button.
-//! 5. **Inconsistent / swallowed errors.** Several `ok_or_else` messages
-//!    didn't say which action they were for once bubbled up, and the
-//!    generic `_ => anyhow::bail!("Unsupported browser action: {}", other)`
-//!    gave no hint about valid actions. Errors now consistently name the
-//!    action and, where useful, list the valid alternatives.
-//! 6. **`contains` on `click` silently ignored `text` priority ambiguity.**
-//!    If both `text` and `contains` were passed, `contains` was silently
-//!    dropped with no signal. Now documented and `text` wins explicitly,
-//!    same as before, but doesn't hide the fact `contains` was ignored —
-//!    it's folded into `text` only when `text` is absent, unchanged
-//!    behavior but now covered by a doc comment and a debug-visible note
-//!    isn't necessary since behavior is deterministic and documented.
-//! 7. **No local fallback for `select`/`type` on eval-blocking sites.**
-//!    Kept eval-based `press` (needed for key semantics) but added a
-//!    `select`/`fill_form` requirement check so a missing `fields`/
-//!    `selector`+`value` gives a clear error instead of a bridge 400.
-//! 8. **Window/session lifecycle gaps.** No way to close a tab, go back/
-//!    forward, or hover — common needs for real navigation flows. Added
-//!    `close_tab`, `go_back`, `go_forward`, `hover`, `drag_and_drop` as
-//!    first-class actions (see BRIDGE-ASSUMPTION).
-//! 9. **Cookies only emulated via eval, with no write path.** `list_cookies`
-//!    existed via `action='list_cookies'` (eval of `document.cookie`,
-//!    read-only, can't see HttpOnly cookies). Added `get_cookies` (bridge
-//!    `listCookies`) and `set_cookies`/`delete_cookie` (bridge `setCookie`/
-//!    `removeCookie`, fanned out per cookie) so httpOnly session
-//!    cookies can actually be managed for automation/login flows. The old
-//!    `list_cookies` eval path is kept as a deprecated alias for backward
-//!    compatibility (still works with zero bridge changes) but the schema
-//!    now recommends `get_cookies`. (Bridge wire names were also wrong:
-//!    `getCookies`/`setCookies`/`deleteCookie`/`goBack`/`goForward`/
-//!    `dragAndDrop` were guessed from the camelCase convention but the
-//!    extension speaks `listCookies`/`setCookie`/`removeCookie`/`back`/
-//!    `forward`/`drag` — every one of those actions failed with
-//!    "Unknown action". Names are now verified against the bundled XPI, see
-//!    the BRIDGE NAMES comment on the dispatch match, and
-//!    `REQUIRED_BRIDGE_ACTION_PROBES` covers every mapped wire action so
-//!    `status` reports the truth instead of a false `compatible: true`.)
-//! 10. **Screenshot metadata clobbering.** `attach_browser_metadata` and
-//!     `prepend_setup_message` both did the "unwrap object or wrap non-
-//!     object" dance duplicated 2x; factored into one helper
-//!     `merge_into_metadata_object`.
-//! 11. **`max_length` for `get_content` silently ignored for non-html
-//!     formats**, even though `text`/`textFast` dumps can also be huge on
-//!     content-heavy pages. Now applied whenever provided, regardless of
-//!     format, with the same 60_000 default kept only for `html` (text
-//!     formats default to no cap, matching original behavior, to avoid
-//!     silently truncating text a caller expected in full).
-//! 12. **Retry/backoff and bridge install race**: `firefox_run_bridge_command`
-//!     re-checked `bin.exists()` after calling setup but didn't re-verify
-//!     the binary was *executable*/functional — left as-is structurally,
-//!     but wrapped in the new retry helper so a just-installed binary that
-//!     needs a moment to become runnable gets one more chance.
-//! 13. **Active-tab hijack**: `open` without `new_tab` let the bridge
-//!     resolve the *user's currently active tab* and navigate it, and the
-//!     bridge's short-lived tab cache made follow-up actions fall back to
-//!     that same tab. Now `open` defaults to a new background tab, each
-//!     session pins the tab it opens/selects and injects that id into
-//!     follow-up actions, tab-loss recovery never silently repoints a
-//!     mutating action at the user's active tab, and `close_tab` without
-//!     any target refuses instead of closing the user's tab.
+//! # Tab isolation (bug fix #13)
 //!
-//! ## New actions added
-//! `close_tab`, `go_back`, `go_forward`, `hover`, `drag_and_drop`,
-//! `get_cookies`, `set_cookies`, `delete_cookie`, `reload`.
+//! `resolveTabId` in the extension falls back to the **user's currently
+//! active tab** whenever a request carries no `tabId`, and the bridge's
+//! internal tab cache only lives ~900 ms. Left alone, the agent's
+//! click/type/eval calls silently land in whatever tab the user is looking
+//! at. So: `open` defaults to a new background tab, every session pins the
+//! tab it opened or selected and that id is injected into follow-up
+//! actions, an untargeted mutating action refuses instead of guessing, and
+//! tab-loss recovery never repoints a targeted request at the active tab.
 //!
-//! Everything else (action names, parameter names, JSON shapes sent to the
-//! bridge) is unchanged from the original so existing callers/prompts do
-//! not break.
+//! # Bugs fixed
+//! 1. **The tool did not compile.** Two tests passed a `&mut Map<String,
+//!    Value>` to `apply_session_tab_pin`, which takes `&mut Value`, and one
+//!    chained `.or_else(|| input.tab_id)` where clippy's
+//!    `unnecessary_lazy_evaluations` (CI runs `-D warnings`) rejects it.
+//! 2. **`screenshot` never returned an image.** The extension answers with
+//!    `{tabId, dataUrl, method}`; there is no `filename` parameter and no
+//!    `saved` field. The old code looked for `result.saved`, fell back to a
+//!    temp path the bridge never writes, silently failed to read it, and
+//!    then reported "Captured browser screenshot to <temp path>" — a file
+//!    that did not exist. It now decodes `dataUrl` and attaches the image.
+//! 3. **`upload` could not work.** `uploadFile` reads `files`/`file` with
+//!    base64 payloads; the `filePath`/`fileName` keys we sent appear
+//!    nowhere in the extension, so every upload died with "uploadFile
+//!    requires file or files". The file is now read and base64-encoded here.
+//! 4. **`max_length` was a no-op.** The content script clamps with
+//!    `maxChars` (and `textMaxChars` for the annotated text section);
+//!    `maxLength` appears nowhere in the extension.
+//! 5. **`wait position='dom-stable'` / `'network-idle'` were no-ops.** Both
+//!    were sent as `domStable`/`networkIdle`, which also appear nowhere;
+//!    `waitFor` has no quiet-period mode, so it silently degraded into a
+//!    `document.readyState` check that returned immediately. Both now route
+//!    to the extension's real `waitForStable` action.
+//! 6. **`wait` with only `timeout_ms` returned instantly** for the same
+//!    reason (the readiness check was already true), despite the schema
+//!    promising a fixed delay. A bare `timeout_ms` is now honoured locally.
+//! 7. **`press` bypassed the extension's real key handling.** It was routed
+//!    to `evaluate` with a hand-rolled script that assigned `el.value`
+//!    directly — which React-controlled inputs ignore, since they override
+//!    the DOM value setter — and that could not move focus with Tab or
+//!    dismiss a dialog with Escape. The extension already ships a native
+//!    `press` action built on the prototype value setter; use it.
+//! 8. **`type submit=true` was silently dropped** — the content script's
+//!    `typeInto` never looks at `submit`. A native Enter press (which does
+//!    `form.requestSubmit()`) is now issued after the text lands.
+//! 9. **In-place `open` could still hijack the user's tab.** `open` with an
+//!    explicit `new_tab: false` and no `tab_id` navigates the active tab
+//!    once `newTab: false` reaches `resolveTabId`; that case is now covered
+//!    by the isolation guard too.
+//! 10. **`screenshot` could raise the user's tab**: the extension's
+//!     `captureVisibleTab` fallback does `tabs.update(tabId, {active:true})`,
+//!     so an untargeted screenshot was not the pure read it looked like.
+//! 11. **`missing_tab_error` false-positived on page errors.** The needle
+//!     `"no tab"` matched "no table of contents" and `"error: tab"` matched
+//!     "Error: Table not found", which then triggered a pointless tab
+//!     re-resolution and replaced the real error with a tab hint. Matching
+//!     now guards both token edges.
+//! 12. **Unbounded, poison-fragile session pin map.** One entry per session
+//!     id was kept for the life of the process and silently dropped every
+//!     write if the mutex was ever poisoned. It is now bounded (oldest pin
+//!     evicted) and recovers from poisoning.
+//! 13. **A wedged bridge process hung the tool forever.** `output()` has no
+//!     timeout; the child is now spawned with a deadline and killed.
+//! 14. **`open` dumped the whole page into the tool result.** `navigate`
+//!     returns a full annotated content dump by default, which landed in
+//!     both the rendered text and the metadata on every navigation. It is
+//!     now suppressed (`returnContent: false`) and `open` renders a short
+//!     summary instead.
+//! 15. **Action typos reported the wrong error.** An unknown action ran the
+//!     readiness probe first, so on a not-ready bridge the agent was told
+//!     "browser not ready" instead of "unknown action". The action is now
+//!     validated up front against `KNOWN_ACTIONS`.
+//! 16. **`provider_command` params were mutated.** The raw passthrough
+//!     payload had the session tab pin injected into it, adding a `tabId`
+//!     the caller never asked for; it is now left untouched.
+//! 17. **A long `MAX_RETRIES` comment claimed 2 attempts** for a loop that
+//!     runs 3; the comment now matches the code.
 
 use super::{Tool, ToolContext, ToolOutput};
 use anyhow::{Context, Result};
@@ -143,19 +123,86 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 pub struct BrowserTool;
 
 static FIREFOX_PROVIDER: FirefoxBridgeProvider = FirefoxBridgeProvider;
 
-/// Monotonic counter to keep screenshot temp filenames unique even when
-/// multiple calls land in the same millisecond (fixes bug #3).
-static SCREENSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Tracks consecutive read-only actions to detect verification loops.
+///
+/// When the agent makes 3+ consecutive read-only calls (snapshot, get_content,
+/// list_tabs, etc.) without any state-changing action, it's likely stuck in a
+/// verification loop. This counter helps detect that pattern and suggest a
+/// different approach.
+static READ_ONLY_COUNTER: Mutex<Option<HashMap<String, u32>>> = Mutex::new(None);
+
+/// Maximum consecutive read-only actions before suggesting a different approach.
+const MAX_READ_ONLY_ACTIONS: u32 = 3;
+
+/// Check if the current action is read-only and should be counted.
+fn is_read_only_action(action: &str) -> bool {
+    matches!(
+        action,
+        "snapshot" | "get_content" | "list_tabs" | "get_active_tab" | "list_frames"
+            | "interactables" | "screenshot" | "get_cookies" | "list_cookies"
+    )
+}
+
+/// Check if the current action is state-changing.
+fn is_state_changing_action(action: &str) -> bool {
+    matches!(
+        action,
+        "open" | "click" | "hover" | "type" | "fill_form" | "select" | "drag_and_drop"
+            | "press" | "scroll" | "upload" | "set_cookies" | "delete_cookie" | "close_tab"
+            | "reload" | "go_back" | "go_forward"
+    )
+}
+
+/// Increment the read-only counter for a session and return the new count.
+///
+/// Returns true if the agent should be warned about a verification loop.
+fn increment_read_only_counter(session: &str) -> bool {
+    let mut counter = READ_ONLY_COUNTER.lock().unwrap();
+    let map = counter.get_or_insert_with(HashMap::new);
+    let count = map.entry(session.to_string()).or_insert(0);
+    *count += 1;
+    *count >= MAX_READ_ONLY_ACTIONS
+}
+
+/// Reset the read-only counter for a session.
+fn reset_read_only_counter(session: &str) {
+    let mut counter = READ_ONLY_COUNTER.lock().unwrap();
+    if let Some(map) = counter.as_mut() {
+        map.remove(session);
+    }
+}
+
+/// Get a warning message if the agent is in a verification loop.
+fn get_verification_loop_warning(session: &str) -> Option<String> {
+    let mut counter = READ_ONLY_COUNTER.lock().unwrap();
+    if let Some(map) = counter.as_mut() {
+        if let Some(count) = map.get(session) {
+            if *count >= MAX_READ_ONLY_ACTIONS {
+                return Some(format!(
+                    "WARNING: You have made {} consecutive read-only actions without any state-changing results. \
+                     You may be stuck in a verification loop. \
+                     Try a different approach: \
+                     1) If you're trying to verify something, make a state-changing action instead. \
+                     2) If you're exploring, try to find something actionable. \
+                     3) If you're stuck, report your findings and move on.",
+                    count
+                ));
+            }
+        }
+    }
+    None
+}
 
 /// Session → agent-owned tab pin.
 ///
@@ -166,31 +213,66 @@ static SCREENSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// agent opened or explicitly selected for its own session so every
 /// follow-up action carries an explicit `tabId` and can never hijack the
 /// user's tab.
-static SESSION_TAB_PINS: Mutex<Option<HashMap<String, i64>>> = Mutex::new(None);
+static SESSION_TAB_PINS: Mutex<Option<HashMap<String, PinnedTab>>> = Mutex::new(None);
 
-fn session_tab_pin(session_id: &str) -> Option<i64> {
+/// Insertion counter, used only to pick which pin to evict when the map is
+/// full. Monotonic, so the smallest value is always the oldest pin.
+static PIN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Upper bound on tracked session pins.
+///
+/// Sessions are never torn down explicitly, so without a bound the map grows
+/// by one entry per session id for the lifetime of the process. Well above any
+/// realistic number of concurrently live sessions, low enough to stay trivial.
+const MAX_TRACKED_SESSION_TABS: usize = 256;
+
+/// A session's pinned tab plus the sequence number it was claimed at.
+#[derive(Clone, Copy)]
+struct PinnedTab {
+    tab_id: i64,
+    seq: u64,
+}
+
+/// Lock the pin map, recovering from poisoning.
+///
+/// A poisoned lock used to be swallowed with `.ok()`, which silently disabled
+/// pinning for the rest of the process: every `remember_session_tab` became a
+/// no-op and each mutating action then failed the isolation guard even though
+/// the agent owned a tab. The map holds only plain data, so the poison is
+/// meaningless and the inner value is perfectly usable.
+fn session_tab_pins() -> MutexGuard<'static, Option<HashMap<String, PinnedTab>>> {
     SESSION_TAB_PINS
         .lock()
-        .ok()?
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn session_tab_pin(session_id: &str) -> Option<i64> {
+    session_tab_pins()
         .as_ref()
-        .and_then(|pins| pins.get(session_id).copied())
+        .and_then(|pins| pins.get(session_id).map(|pin| pin.tab_id))
 }
 
 fn remember_session_tab(session_id: &str, tab_id: i64) {
-    if let Ok(mut guard) = SESSION_TAB_PINS.lock() {
-        guard
-            .get_or_insert_with(HashMap::new)
-            .insert(session_id.to_string(), tab_id);
+    let seq = PIN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut guard = session_tab_pins();
+    let pins = guard.get_or_insert_with(HashMap::new);
+    if pins.len() >= MAX_TRACKED_SESSION_TABS
+        && let Some(oldest) = pins
+            .iter()
+            .min_by_key(|(_, pin)| pin.seq)
+            .map(|(id, _)| id.clone())
+    {
+        pins.remove(&oldest);
     }
+    pins.insert(session_id.to_string(), PinnedTab { tab_id, seq });
 }
 
 fn forget_session_tab(session_id: &str, tab_id: i64) {
-    if let Ok(mut guard) = SESSION_TAB_PINS.lock() {
-        if let Some(pins) = guard.as_mut() {
-            if pins.get(session_id) == Some(&tab_id) {
-                pins.remove(session_id);
-            }
-        }
+    let mut guard = session_tab_pins();
+    if let Some(pins) = guard.as_mut()
+        && pins.get(session_id).map(|pin| pin.tab_id) == Some(tab_id)
+    {
+        pins.remove(session_id);
     }
 }
 
@@ -224,13 +306,21 @@ impl Default for BrowserTool {
 }
 
 fn browser_tool_description_text() -> &'static str {
-    "Control the browser for JS-heavy INTERACTIVE pages only (login flows, dynamic DOM, click-through). For read-only research/listings/docs/APIs use webfetch/websearch FIRST — never browser. Check action='status' ONCE; if not ready, fall back immediately to webfetch/websearch and do NOT retry open/setup in a loop (max 1 setup per session). To navigate, use action='open' with url ('navigate' is an alias; 'open' requires url). open always creates a NEW background tab unless you pass new_tab=false (reuses your current tab); it NEVER navigates the user's active tab. Tab isolation: after open/new_tab/select_tab, your later click/type/eval actions stay scoped to YOUR tab — the user's tab is off-limits unless they explicitly asked you to use it. \
-     For cookies use 'get_cookies' (real bridge call, sees HttpOnly) or 'list_cookies' (legacy eval, misses HttpOnly); 'set_cookies'/'delete_cookie' to write. \
-     For eval scripts use `return <expr>` for values; top-level `await` IS supported. \
-     Do NOT use Playwright/Response APIs - fetch() already resolves text. \
-     For many URLs: `await Promise.all(urls.map(u => fetch(u).then(r => r.text())))`. \
-     Escape regex parens: `/foo\\(bar\\)/` not `/foo(bar)/`. \
-     Use 'close_tab', 'go_back', 'go_forward', 'reload', 'hover', 'drag_and_drop' beyond click/type."
+    // Kept under the shared tool-description token cap: this text is sent on
+    // every request, and `tool_descriptions_stay_under_token_cap` guards it.
+    // Per-action detail lives in the `action` parameter description and in
+    // runtime errors, which only cost tokens when they actually happen.
+    "Browser control for JS-heavy INTERACTIVE pages only (login, dynamic DOM, click-through). \
+     For read-only research, listings, docs, or APIs use webfetch/websearch FIRST. \
+     Check action='status' ONCE; if not ready fall back immediately and do not loop on setup. \
+     'open' (alias 'navigate') needs url and creates a NEW background tab - it never navigates \
+     the user's tab, and your later click/type/eval stay scoped to your own tab. Navigation \
+     returns no page body; follow with 'snapshot'. \
+     Cookies: 'get_cookies' sees HttpOnly, 'set_cookies'/'delete_cookie' write, 'list_cookies' \
+     is legacy eval only. \
+     Eval: end scripts with `return <expr>`; top-level await works; read responses with \
+     `await (await fetch(u)).text()`. \
+     Also: 'close_tab', 'go_back', 'go_forward', 'reload', 'hover', 'drag_and_drop'."
 }
 
 #[derive(Debug, Deserialize)]
@@ -345,11 +435,54 @@ struct CookieInput {
     expires: Option<f64>,
 }
 
+/// Every action the dispatch table accepts (aliases already normalized).
+///
+/// Kept separate from the schema `enum` so the pre-flight check in
+/// `Tool::execute` can reject a typo *before* the readiness probe runs —
+/// otherwise an unknown action on a not-ready bridge reports "browser not
+/// ready" and sends the agent off installing a browser it already has. The
+/// `schema_action_enum_matches_known_actions` test keeps it in sync with the
+/// published schema.
+const KNOWN_ACTIONS: &[&str] = &[
+    "status",
+    "setup",
+    "list_tabs",
+    "new_tab",
+    "select_tab",
+    "get_active_tab",
+    "list_frames",
+    "open",
+    "reload",
+    "go_back",
+    "go_forward",
+    "close_tab",
+    "snapshot",
+    "get_content",
+    "interactables",
+    "click",
+    "hover",
+    "type",
+    "fill_form",
+    "select",
+    "drag_and_drop",
+    "wait",
+    "screenshot",
+    "eval",
+    "scroll",
+    "upload",
+    "press",
+    "get_cookies",
+    "set_cookies",
+    "delete_cookie",
+    "list_cookies",
+    "provider_command",
+];
+
 /// Actions that are pure reads and therefore safe to retry on a transient
-/// bridge failure (fixes bug #4). Mutating actions (click/type/press/
-/// upload/eval/fill_form/select/scroll/drag/hover) are never retried
-/// automatically because a retry after a failed-but-partially-applied
-/// mutation could double-submit or double-click.
+/// bridge failure. Mutating actions (click/type/press/upload/eval/
+/// fill_form/select/scroll/drag/hover) are never retried automatically
+/// because a retry after a failed-but-partially-applied mutation could
+/// double-submit or double-click.
 const RETRYABLE_ACTIONS: &[&str] = &[
     "status",
     "list_tabs",
@@ -358,10 +491,12 @@ const RETRYABLE_ACTIONS: &[&str] = &[
     "get_content",
     "interactables",
     "snapshot",
+    "wait",
     "get_cookies",
     "list_cookies",
 ];
 
+/// Retries after the first attempt, so the loop below runs up to 3 times.
 const MAX_RETRIES: u32 = 2;
 const RETRY_BACKOFF: Duration = Duration::from_millis(250);
 
@@ -369,6 +504,13 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(250);
 /// bridge resolves. When neither the caller nor the session pin names a tab,
 /// the bridge would target the user's currently active tab — so these refuse
 /// with guidance instead of silently mutating the user's page (bug fix #13).
+///
+/// `screenshot` is in the list because it is not the pure read it looks like:
+/// the extension's `captureVisibleTab` fallback path does
+/// `tabs.update(tabId, { active: true })`, i.e. it raises the tab in front of
+/// the user. (`open` is handled separately: it is only tab-scoped when the
+/// caller asks for an in-place navigation, because its default creates its own
+/// tab.)
 const TAB_SCOPED_MUTATING_ACTIONS: &[&str] = &[
     "reload",
     "go_back",
@@ -384,6 +526,7 @@ const TAB_SCOPED_MUTATING_ACTIONS: &[&str] = &[
     "upload",
     "press",
     "eval",
+    "screenshot",
 ];
 
 #[async_trait]
@@ -473,7 +616,7 @@ impl Tool for BrowserTool {
                     "scroll", "upload", "press", "get_cookies", "set_cookies", "delete_cookie",
                     "list_cookies", "provider_command"
                 ],
-                "description": "Action. Check 'status' first; run 'setup' only if not ready. To navigate, use 'open' with url ('navigate' is an alias). open creates a NEW background tab by default (new_tab=false reuses the agent's current tab) and never touches the user's active tab. eval may be blocked by CSP on some sites - use click/type/snapshot instead. 'wait' accepts timeout_ms alone or position='dom-stable'/'network-idle'. get_cookies/set_cookies/delete_cookie handle real (incl. HttpOnly) cookies; list_cookies is legacy JS-only."
+                "description": "Action. Check 'status' once first. 'open' takes url, opens a new background tab, and returns no page body - follow with 'snapshot'. 'wait': timeout_ms alone is a plain delay; selector/text/position waits on a target. 'press' sends a real key; 'type' with submit=true also submits. 'upload' takes a local file path. Cookies: get_cookies/set_cookies/delete_cookie; list_cookies is legacy JS-only. Use 'domain' param with get_cookies to filter by domain (e.g., 'domain': 'paypal.com')."
             }),
         );
         properties.insert(
@@ -643,17 +786,49 @@ impl Tool for BrowserTool {
             Err(error) => return Err(invalid_input_error(&input, &error)),
         };
         let provider = resolve_provider(params.browser.as_deref())?;
+        let action = normalize_action(&params.action);
 
-        match normalize_action(&params.action) {
+        // Validate the action *before* the readiness probe: `ensure_ready`
+        // talks to Firefox and can take seconds, and when the bridge is not
+        // running it reports "browser not ready" for every action — including
+        // typos. A misspelled action used to hide behind that message and
+        // send the agent into a pointless install loop.
+        if !matches!(action, "status" | "setup") && !KNOWN_ACTIONS.contains(&action) {
+            anyhow::bail!(unsupported_action_message(action));
+        }
+
+        // Verification loop detection: track consecutive read-only actions
+        let session = ctx.session_id.as_str();
+        let loop_warning = if is_state_changing_action(&action) {
+            reset_read_only_counter(session);
+            None
+        } else if is_read_only_action(&action) {
+            let should_warn = increment_read_only_counter(session);
+            if should_warn {
+                get_verification_loop_warning(session)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        match action {
             "status" => provider.status(&ctx).await,
             "setup" => provider.setup().await,
             other => {
                 let setup_message = provider.ensure_ready().await?;
                 let output = provider.execute(other, &params, &ctx).await?;
-                Ok(match setup_message {
+                let output = match setup_message {
                     Some(message) if !message.is_empty() => prepend_setup_message(output, &message),
                     _ => output,
-                })
+                };
+                // Append verification loop warning if detected
+                if let Some(warning) = loop_warning {
+                    Ok(ToolOutput::new(format!("{}\n\n{}", output.output, warning)))
+                } else {
+                    Ok(output)
+                }
             }
         }
     }
@@ -857,22 +1032,68 @@ async fn execute_firefox_action(
     // currently active tab, so the agent would read, click, and type in the
     // tab the user is working in.
     let (bridge_action, mut bridge_params, title) = bridge_request(action, input)?;
-    let pinned = apply_session_tab_pin(&mut bridge_params, &ctx.session_id);
+
+    // `uploadFile` needs the file bytes inline (base64), so the payload is
+    // built here rather than in the pure `bridge_request` mapping. Done
+    // before the pin so the injected `tabId` lands in the final params.
+    if action == "upload" {
+        let mut upload = upload_params(input).await?;
+        apply_common_targeting(&mut upload, input);
+        bridge_params = Value::Object(upload);
+    }
+
+    // `provider_command` is a raw passthrough: the caller owns the whole wire
+    // payload, so the pin must not inject a `tabId` it never asked for.
+    let pinned = if action == "provider_command" {
+        false
+    } else {
+        apply_session_tab_pin(&mut bridge_params, &ctx.session_id)
+    };
 
     // Isolation guard: a mutating action with no explicit target and no
     // session pin would land on the user's currently active tab. Refuse and
     // tell the agent how to get its own tab instead.
+    //
+    // `open` is only tab-scoped for an *in-place* navigation. With
+    // `new_tab: false` and no `tabId`, the extension takes the
+    // `resolveTabId({})` branch and navigates whatever tab the user is
+    // looking at — exactly the hijack this guard exists to stop. The default
+    // (`newTab: true`) creates its own tab, so it stays allowed.
+    let in_place_navigation =
+        action == "open" && bridge_params.get("newTab") == Some(&json!(false));
     if !pinned
         && bridge_params.get("tabId").and_then(Value::as_i64).is_none()
-        && TAB_SCOPED_MUTATING_ACTIONS.contains(&action)
+        && (TAB_SCOPED_MUTATING_ACTIONS.contains(&action) || in_place_navigation)
     {
+        let remedy = if in_place_navigation {
+            "action='open' with new_tab=true (the default) creates a new tab, or pass the tab_id you mean to reuse"
+        } else {
+            "Open your own tab first with action='open' (creates a new tab by default), or pick one explicitly via action='list_tabs' + tab_id"
+        };
         anyhow::bail!(
-            "browser action '{action}' has no target tab and would act on the user's currently active tab. Open your own tab first with action='open' (creates a new tab by default), or pick one explicitly via action='list_tabs' + tab_id. Never act on the user's tab unless they asked for it."
+            "browser action '{action}' has no target tab and would act on the user's currently active tab. {remedy}. Never act on the user's tab unless they asked for it."
         );
     }
 
     if bridge_action == "screenshot" {
         return screenshot_via_bridge(&bridge_params, title, ctx).await;
+    }
+
+    // The content script's `waitFor` has no "just sleep" mode: with no
+    // selector/text/url target its check falls through to
+    // `document.readyState`, which is normally already true, so a bare
+    // `timeout_ms` returned in ~0 ms despite the schema promising a fixed
+    // delay. Honor it locally instead — no bridge round-trip, no page access.
+    if is_fixed_delay_wait(input) {
+        let waited_ms = input.timeout_ms.unwrap_or(0).min(MAX_FIXED_DELAY_WAIT_MS);
+        if waited_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(waited_ms)).await;
+        }
+        return Ok(render_browser_output(
+            action,
+            title,
+            json!({"waited": true, "ms": waited_ms, "source": "local"}),
+        ));
     }
 
     // The wire has no batch cookie-set: one `setCookie` call per cookie.
@@ -889,9 +1110,10 @@ async fn execute_firefox_action(
             apply_common_targeting(&mut params, input);
             calls.push((cookie.name.clone(), Value::Object(params)));
         }
+        // No tab pin here: `cookieAction` addresses cookies by url/domain and
+        // never resolves a tab, so a `tabId` would be dead weight.
         let mut applied = Vec::with_capacity(calls.len());
-        for (name, mut params) in calls {
-            apply_session_tab_pin(&mut params, &ctx.session_id);
+        for (name, params) in calls {
             let one = firefox_run_bridge_command("setCookie", params, ctx)
                 .await
                 .map_err(|e| enrich_browser_error(action, e))?;
@@ -904,9 +1126,40 @@ async fn execute_firefox_action(
         ));
     }
 
-    let result = firefox_run_bridge_command_with_retry(action, &bridge_action, bridge_params, ctx)
-        .await
-        .map_err(|e| enrich_browser_error(action, e))?;
+    // `type`'s `submit` flag is silently ignored by the content script
+    // (`typeInto` never reads it), so capture the targeting keys now — before
+    // `bridge_params` is moved into the bridge call — and issue a native Enter
+    // press afterwards, which is what actually calls `form.requestSubmit()`.
+    let submit_press = if action == "type" && input.submit == Some(true) {
+        let mut enter = Map::new();
+        enter.insert("key".into(), json!("Enter"));
+        enter.insert("submit".into(), json!(true));
+        for key in ["tabId", "frameId", "allFrames"] {
+            if let Some(value) = bridge_params.get(key) {
+                enter.insert(key.into(), value.clone());
+            }
+        }
+        Some(Value::Object(enter))
+    } else {
+        None
+    };
+
+    let mut result =
+        firefox_run_bridge_command_with_retry(action, &bridge_action, bridge_params, ctx)
+            .await
+            .map_err(|e| enrich_browser_error(action, e))?;
+
+    if let Some(press_params) = submit_press {
+        let pressed = firefox_run_bridge_command("press", press_params, ctx)
+            .await
+            .map_err(|e| enrich_browser_error("press", e))?;
+        if let Some(object) = result.as_object_mut() {
+            object.insert(
+                "submit".into(),
+                json!({"submitted": true, "result": pressed}),
+            );
+        }
+    }
 
     // Learn/maintain the session tab pin from the actions that create or
     // retarget the session's tab, and drop it when that tab is closed.
@@ -918,7 +1171,7 @@ async fn execute_firefox_action(
         }
         "close_tab" => {
             let closed = tab_id_from_value(&result)
-                .or_else(|| input.tab_id)
+                .or(input.tab_id)
                 .or_else(|| session_tab_pin(&ctx.session_id));
             if let Some(tab_id) = closed {
                 forget_session_tab(&ctx.session_id, tab_id);
@@ -935,6 +1188,22 @@ async fn execute_firefox_action(
     Ok(render_browser_output(action, title, result))
 }
 
+/// Ceiling for a locally honored `wait` delay, so a mistyped `timeout_ms`
+/// cannot pin a tool call open for hours.
+const MAX_FIXED_DELAY_WAIT_MS: u64 = 120_000;
+
+/// True when `wait` asked for nothing but a delay.
+///
+/// The extension's `waitFor` resolves a targetless request against
+/// `document.readyState`, so `timeout_ms` on its own never actually waits.
+fn is_fixed_delay_wait(input: &BrowserInput) -> bool {
+    input.timeout_ms.is_some()
+        && input.selector.is_none()
+        && input.text.is_none()
+        && input.contains.is_none()
+        && input.position.is_none()
+}
+
 /// Record in the tool metadata that an action was scoped to the session's
 /// own tab, so operators can see the agent is not touching their tab.
 fn annotate_pinned_targeting(mut result: Value) -> Value {
@@ -945,14 +1214,20 @@ fn annotate_pinned_targeting(mut result: Value) -> Value {
 }
 
 /// Turns common raw bridge/eval failures into actionable hints instead of
-/// leaving the agent to guess. Ported from a parallel edit and extended to
-/// also cover the new press/select/drag_and_drop paths.
+/// leaving the agent to guess. Only `eval` produces JavaScript syntax/runtime
+/// errors now — `press` uses the extension's native key handling — so the
+/// eval-specific hints are keyed on the action or on the bridge's own
+/// `Evaluate error:` prefix.
 fn enrich_browser_error(action: &str, err: anyhow::Error) -> anyhow::Error {
     let msg = err.to_string();
     let lower = msg.to_ascii_lowercase();
     if missing_tab_error(&msg) {
         return anyhow::anyhow!(
-            "{msg}\n\nHint: the browser tab changed or closed (often after a bridge/server restart). Run action='list_tabs', then action='select_tab' with a current tab_id, or action='open' to create a fresh tab before retrying."
+            "{msg}\n\nHint: the browser tab changed or closed (often after a bridge/server restart). \
+             Run action='list_tabs', then action='select_tab' with a current tab_id, or action='open' \
+             to create a fresh tab before retrying. \
+             IMPORTANT: Always reuse existing authenticated tabs instead of opening new ones. \
+             Check 'list_tabs' first to find tabs that are already logged in."
         );
     }
     if lower.contains("connection refused")
@@ -962,7 +1237,7 @@ fn enrich_browser_error(action: &str, err: anyhow::Error) -> anyhow::Error {
             "{msg}\n\nHint: the Firefox bridge is not connected. Run action='status' once, then action='setup' if it is not ready; avoid repeatedly retrying the browser action."
         );
     }
-    if action == "eval" || action == "press" || bridge_is_evaluate(&msg) {
+    if action == "eval" || bridge_is_evaluate(&msg) {
         if lower.contains("await is only valid in async") {
             return anyhow::anyhow!(
                 "{msg}\n\nHint: top-level `await` is supported by a current bridge, but this error came from an old extension. Update with action='setup', or wrap manually: `return (async () => {{ ... return await fetch(u).then(r => r.text()); }})()`."
@@ -1012,6 +1287,19 @@ fn enrich_browser_error(action: &str, err: anyhow::Error) -> anyhow::Error {
     if action == "drag_and_drop" && lower.contains("unknown action") {
         return anyhow::anyhow!(
             "{msg}\n\nHint: drag_and_drop needs bridge support for a 'drag' action (extension 1.6.0+). Run action='status' to confirm, then action='setup' to update; until then, fall back to eval with manual dragstart/dragover/drop DispatchEvent sequences."
+        );
+    }
+    // The extension rejects an `uploadFile` with no inline file specs, which is
+    // the signature of a payload that never carried the bytes. Name the
+    // requirement instead of leaving the agent to re-read the bridge source.
+    if action == "upload" && lower.contains("requires file or files") {
+        return anyhow::anyhow!(
+            "{msg}\n\nHint: the bridge expects the file's bytes inline as 'files: [{{name, type, data}}]' with base64 data (it cannot read the agent's filesystem). Alphacode now sends that automatically; if you reached this via action='provider_command', pass 'files' yourself rather than a filesystem path."
+        );
+    }
+    if action == "upload" && (lower.contains("no file input") || lower.contains("no such file")) {
+        return anyhow::anyhow!(
+            "{msg}\n\nHint: the page has no usable <input type=\"file\"> (it may be hidden, disabled, or inside a frame). Run action='interactables' to find a file input, pass its 'selector', and target the right frame via action='list_frames' + frame_id."
         );
     }
     err
@@ -1064,14 +1352,13 @@ fn bridge_compatible_eval_script(script: &str) -> String {
     format!("(async () => {{\n{body}\n}})()")
 }
 
-fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, String)> {
-    // BRIDGE NAMES (verified against the bundled AlphaCode-Browser-Agent-1.6.0.xpi):
-    // the extension speaks `back`/`forward` (navigationAction), `drag`
-    // (content-script dragElement via sendContent), and singular cookie
-    // actions `listCookies`/`setCookie`/`removeCookie` (cookieAction). There
-    // is no batch cookie-set on the wire, so `set_cookies` fans out to one
-    // `setCookie` call per cookie in `execute_firefox_action`.
-    let bridge_action = match action {
+/// Which bridge action backs a given logical action.
+///
+/// See the bridge contract table at the top of this file: the wire names are
+/// not all derivable from the camelCase convention, and a wrong one fails as
+/// "Unknown action" at runtime.
+fn bridge_action_for(action: &str, input: &BrowserInput) -> Result<Cow<'static, str>> {
+    let mapped = match action {
         "list_tabs" => "listTabs",
         "new_tab" => "newSession",
         "select_tab" => "setActiveTab",
@@ -1091,29 +1378,60 @@ fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, 
         "fill_form" => "fillForm",
         "select" => "fillForm",
         "drag_and_drop" => "drag",
-        "wait" => "waitFor",
+        "wait" => wait_bridge_action(input),
         "screenshot" => "screenshot",
         "eval" => "evaluate",
         "scroll" => "scroll",
         "upload" => "uploadFile",
-        "press" => "evaluate",
+        "press" => "press",
         "get_cookies" => "listCookies",
         "set_cookies" => "setCookie",
         "delete_cookie" => "removeCookie",
         "list_cookies" => "evaluate",
-        "provider_command" => input.provider_action.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("provider_action is required when action='provider_command'")
-        })?,
-        other => anyhow::bail!(
-            "Unsupported browser action: '{}'. Valid actions: status, setup, list_tabs, new_tab, \
-             select_tab, get_active_tab, list_frames, open (alias: navigate), reload, go_back, \
-             go_forward, close_tab, snapshot, get_content, interactables, click, hover, type, \
-             fill_form, select, drag_and_drop, wait, screenshot, eval, scroll, upload, press, \
-             get_cookies, set_cookies, delete_cookie, list_cookies, provider_command.",
-            other
-        ),
+        // The caller names the wire action verbatim, so this one is owned
+        // rather than borrowed from the static table above.
+        "provider_command" => {
+            return input
+                .provider_action
+                .clone()
+                .map(Cow::Owned)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("provider_action is required when action='provider_command'")
+                });
+        }
+        other => anyhow::bail!(unsupported_action_message(other)),
+    };
+    Ok(Cow::Borrowed(mapped))
+}
+
+/// `wait` has to pick between two different extension actions.
+///
+/// `waitFor` waits for a *target* (selector/text/url/title/...) and, with no
+/// target, falls through to a `document.readyState` check that is normally
+/// already true. A quiet-period wait — what `position: 'dom-stable'` and the
+/// `network-idle` approximation mean — is a separate action,
+/// `waitForStable`. Sending `domStable`/`networkIdle` to `waitFor` (as this
+/// used to) matched nothing in the extension and silently degraded to the
+/// readyState check.
+fn wait_bridge_action(input: &BrowserInput) -> &'static str {
+    match input.position.as_deref() {
+        Some("dom-stable") | Some("network-idle") => "waitForStable",
+        _ => "waitFor",
     }
-    .to_string();
+}
+
+fn unsupported_action_message(action: &str) -> String {
+    format!(
+        "Unsupported browser action: '{action}'. Valid actions: status, setup, list_tabs, new_tab, \
+         select_tab, get_active_tab, list_frames, open (alias: navigate), reload, go_back, \
+         go_forward, close_tab, snapshot, get_content, interactables, click, hover, type, \
+         fill_form, select, drag_and_drop, wait, screenshot, eval, scroll, upload, press, \
+         get_cookies, set_cookies, delete_cookie, list_cookies, provider_command."
+    )
+}
+
+fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, String)> {
+    let bridge_action = bridge_action_for(action, input)?.into_owned();
 
     let mut params = Map::new();
     apply_common_targeting(&mut params, input);
@@ -1168,6 +1486,12 @@ fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, 
             if let Some(timeout_ms) = input.timeout_ms {
                 params.insert("timeoutMs".into(), json!(timeout_ms));
             }
+            // `navigate` otherwise ships a full annotated content dump back
+            // with the navigation result, which landed in both the rendered
+            // text and the tool metadata on every single `open`. Navigation
+            // should not cost a whole page of context; `snapshot` /
+            // `get_content` exist for that.
+            params.insert("returnContent".into(), json!(false));
         }
         "reload" | "go_back" | "go_forward" => {
             if let Some(timeout_ms) = input.timeout_ms {
@@ -1181,16 +1505,18 @@ fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, 
         "get_content" => {
             let format = input.format.as_deref().unwrap_or("text");
             params.insert("format".into(), json!(format));
-            // Bug fix #11: max_length previously only applied to
-            // format='html'. Text dumps on content-heavy pages can also
-            // blow the context budget, so honor an explicit max_length for
-            // any format. Only default a cap for html (matching prior
-            // behavior) so text formats aren't silently truncated for
-            // existing callers who didn't ask for a cap.
+            // The content script clamps with `maxChars` (and `textMaxChars`
+            // for the annotated text section). `maxLength` appears nowhere in
+            // the extension, so the documented cap was silently a no-op for
+            // every format. Only default a cap for html (as before) so text
+            // formats are not truncated for callers who did not ask for it.
             if let Some(max_length) = input.max_length {
-                params.insert("maxLength".into(), json!(max_length));
+                params.insert("maxChars".into(), json!(max_length));
+                if format == "annotated" {
+                    params.insert("textMaxChars".into(), json!(max_length));
+                }
             } else if format == "html" {
-                params.insert("maxLength".into(), json!(60_000));
+                params.insert("maxChars".into(), json!(60_000));
             }
         }
         "interactables" => {}
@@ -1239,9 +1565,10 @@ fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, 
             if let Some(clear) = input.clear {
                 params.insert("clear".into(), json!(clear));
             }
-            if let Some(submit) = input.submit {
-                params.insert("submit".into(), json!(submit));
-            }
+            // `submit` is deliberately NOT forwarded here: the content
+            // script's `typeInto` never reads it, so it was a silent no-op and
+            // the agent believed the form had gone out. `execute_firefox_action`
+            // issues a real Enter press once the text lands.
         }
         "fill_form" => {
             let fields = input
@@ -1255,6 +1582,11 @@ fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, 
                 "fields".into(),
                 Value::Array(fields.iter().map(field_to_json).collect()),
             );
+            // Unlike `type`, `fillForm` *does* honor a top-level `submit`
+            // (it resolves a submit button and calls `form.requestSubmit()`).
+            if let Some(submit) = input.submit {
+                params.insert("submit".into(), json!(submit));
+            }
         }
         "select" => {
             let selector = input
@@ -1291,15 +1623,28 @@ fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, 
             if input.selector.is_none()
                 && input.text.is_none()
                 && input.contains.is_none()
-                && input.position.as_deref() != Some("dom-stable")
-                && input.position.as_deref() != Some("network-idle")
+                && input.position.is_none()
                 && input.timeout_ms.is_none()
             {
                 anyhow::bail!(
                     "wait requires one of: selector, text, contains, timeout_ms (fixed delay), or position='dom-stable'/'network-idle'"
                 );
             }
+            // Reject an unknown position up front: the bridge action is chosen
+            // from `position` (see `wait_bridge_action`), so a typo would
+            // otherwise silently fall back to a plain `waitFor`.
+            if let Some(position) = input.position.as_deref()
+                && !matches!(position, "dom-stable" | "network-idle")
+                && input.selector.is_none()
+                && input.text.is_none()
+                && input.contains.is_none()
+            {
+                anyhow::bail!(
+                    "wait position '{position}' is invalid here; use 'dom-stable' or 'network-idle', or wait on a selector/text"
+                );
+            }
             // The extension reads `timeoutMs`/`intervalMs`, not `timeout`.
+            // It is the same key for `waitFor` and `waitForStable`.
             if let Some(timeout_ms) = input.timeout_ms {
                 params.insert("timeoutMs".into(), json!(timeout_ms));
             }
@@ -1309,22 +1654,10 @@ fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, 
             {
                 params.insert("text".into(), json!(contains));
             }
-            if input.selector.is_none() && input.text.is_none() && input.contains.is_none() {
-                match input.position.as_deref() {
-                    Some("network-idle") => {
-                        params.insert("networkIdle".into(), json!(true));
-                    }
-                    Some("dom-stable") | None => {
-                        params.insert("domStable".into(), json!(true));
-                    }
-                    Some(other) => {
-                        anyhow::bail!(
-                            "wait position '{}' is invalid here; use 'dom-stable' or 'network-idle', or wait on a selector/text",
-                            other
-                        );
-                    }
-                }
-            }
+            // Nothing left to insert for the quiet-period modes: the action
+            // itself (`waitForStable`, not `waitFor`) is what carries them.
+            // A bare `timeout_ms` is handled locally in
+            // `execute_firefox_action` and never reaches the bridge.
         }
         "screenshot" => {}
         "eval" => {
@@ -1376,25 +1709,35 @@ fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, 
             }
         }
         "upload" => {
-            let path = input
+            // Validation only. The real payload is built in
+            // `execute_firefox_action` (`upload_params`), because
+            // `uploadFile` needs the file's bytes inline as base64 and this
+            // function is pure.
+            input
                 .path
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("path is required for upload"))?;
-            params.insert("filePath".into(), json!(path));
-            if let Some(file_name) = std::path::Path::new(path)
-                .file_name()
-                .and_then(|name| name.to_str())
-            {
-                params.insert("fileName".into(), json!(file_name));
-            }
         }
         "press" => {
-            let script = build_press_script(input.key.as_deref(), input.selector.as_deref())?;
-            params.insert(
-                "script".into(),
-                json!(bridge_compatible_eval_script(&script)),
-            );
-            params.insert("pageWorld".into(), json!(true));
+            // The extension has a real `press` action that mutates the value
+            // through the *prototype* value setter (so React-controlled inputs
+            // actually see it) and implements Tab/Escape/Enter/Space
+            // semantics. It previously went to `evaluate` with a hand-rolled
+            // script that assigned `el.value` directly — invisible to React,
+            // and unable to move focus or close a dialog.
+            let key = input
+                .key
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("key is required for press"))?;
+            if key.is_empty() {
+                anyhow::bail!("press requires a non-empty key");
+            }
+            params.insert("key".into(), json!(key));
+            // `submit: true` makes the extension call `form.requestSubmit()`
+            // for Enter (and to activate a focused submit button).
+            if let Some(submit) = input.submit {
+                params.insert("submit".into(), json!(submit));
+            }
         }
         "get_cookies" => {
             // cookieAction/listCookies reads {url, domain, name, storeId}.
@@ -1461,6 +1804,88 @@ fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, 
         Value::Object(params),
         format!("browser {}", action),
     ))
+}
+
+/// Build the `uploadFile` payload for one local file.
+///
+/// The extension cannot read the agent's filesystem, so `uploadFile` expects
+/// the bytes inline: `files: [{name, type, data}]` where `data` is base64 (an
+/// optional `data:<mime>;base64,` prefix is tolerated) and is turned back into
+/// a `File` by `base64ToFile`. The `filePath`/`fileName` keys this used to
+/// send appear nowhere in the extension, so every upload failed with
+/// "uploadFile requires file or files".
+async fn upload_params(input: &BrowserInput) -> Result<Map<String, Value>> {
+    let path = input
+        .path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("path is required for upload"))?;
+    let file = Path::new(path);
+    if !file.exists() {
+        anyhow::bail!("upload: no such file: {path}");
+    }
+    if file.is_dir() {
+        anyhow::bail!("upload: '{path}' is a directory, not a file");
+    }
+    let bytes = tokio::fs::read(file)
+        .await
+        .with_context(|| format!("upload: failed to read '{path}'"))?;
+    if bytes.is_empty() {
+        anyhow::bail!("upload: '{path}' is empty");
+    }
+    let name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("upload")
+        .to_string();
+    let mut params = Map::new();
+    params.insert(
+        "files".into(),
+        json!([{
+            "name": name,
+            "type": media_type_for(path),
+            "data": STANDARD.encode(&bytes),
+        }]),
+    );
+    // The extension picks the first visible `input[type=file]` when no
+    // selector is given; forward the caller's `selector` (already added by
+    // `apply_common_targeting`) so a specific input can be targeted.
+    Ok(params)
+}
+
+/// Best-effort MIME type from a file extension.
+///
+/// The extension defaults to `application/octet-stream`, which some upload
+/// endpoints reject outright, so the common cases are worth mapping. Anything
+/// unrecognized stays `application/octet-stream` rather than guessing wrong.
+fn media_type_for(path: &str) -> &'static str {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "txt" | "log" | "md" => "text/plain",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" | "mjs" => "text/javascript",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "tar" => "application/x-tar",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        _ => "application/octet-stream",
+    }
 }
 
 fn field_to_json(field: &BrowserField) -> Value {
@@ -1584,125 +2009,15 @@ fn apply_common_targeting(params: &mut Map<String, Value>, input: &BrowserInput)
     }
 }
 
-/// Bug fix #1: the original only dispatched keydown/keypress/keyup, never
-/// mutating the element's value or firing an `input` event. Modern
-/// framework-controlled inputs (React, Vue, most SPA form libraries)
-/// update state from the `input` event, not raw key events, so the old
-/// script would *look* like it worked (events fired, no error) but the
-/// input would stay empty. This version:
-///   - For a single printable character with no special meaning, inserts
-///     it at the current selection/cursor position of an
-///     input/textarea/contenteditable and fires a real `input` event
-///     (InputEvent where supported, so `inputType`/`data` are populated).
-///   - For Backspace/Delete, actually removes a character, native-like.
-///   - For Enter, still submits the form if present (unchanged behavior)
-///     and also fires 'input' for contenteditable / rich text editors that
-///     listen for Enter without a form.
-///   - For all other keys (Tab, Escape, ArrowUp/Down/Left/Right, Home,
-///     End, function keys, modifier combos not otherwise handled), keeps
-///     the original pure keyboard-event dispatch, since synthesizing
-///     "what the key would do" generically isn't reliable — those keys are
-///     usually handled by the page's own keydown listener anyway (menus,
-///     shortcuts), which does receive the event.
-fn build_press_script(key: Option<&str>, selector: Option<&str>) -> Result<String> {
-    let key = key.ok_or_else(|| anyhow::anyhow!("key is required for press"))?;
-    let selector_literal = selector.map(serde_json::to_string).transpose()?;
-    let selector_expr = selector_literal
-        .map(|s| format!("document.querySelector({})", s))
-        .unwrap_or_else(|| "null".to_string());
-    let key_literal = serde_json::to_string(key)?;
-
-    Ok(format!(
-        r#"return (() => {{
-  const target = {selector_expr} || document.activeElement || document.body;
-  if (!target) throw new Error('No target available for key press');
-  if (typeof target.focus === 'function') target.focus();
-  const key = {key_literal};
-  const eventInit = {{ key, bubbles: true, cancelable: true }};
-
-  const isEditable = (el) => {{
-    if (!el) return false;
-    const tag = (el.tagName || '').toLowerCase();
-    return tag === 'input' || tag === 'textarea' || el.isContentEditable === true;
-  }};
-
-  const fireInput = (el, inputType, data) => {{
-    let evt;
-    try {{
-      evt = new InputEvent('input', {{ bubbles: true, cancelable: true, inputType, data: data ?? null }});
-    }} catch (e) {{
-      evt = new Event('input', {{ bubbles: true, cancelable: true }});
-    }}
-    el.dispatchEvent(evt);
-  }};
-
-  target.dispatchEvent(new KeyboardEvent('keydown', eventInit));
-  target.dispatchEvent(new KeyboardEvent('keypress', eventInit));
-
-  let mutated = false;
-  if (isEditable(target)) {{
-    const tag = (target.tagName || '').toLowerCase();
-    const isNativeField = tag === 'input' || tag === 'textarea';
-
-    if (key === 'Backspace' || key === 'Delete') {{
-      if (isNativeField) {{
-        const start = target.selectionStart ?? target.value.length;
-        const end = target.selectionEnd ?? target.value.length;
-        if (start === end && start > 0 && key === 'Backspace') {{
-          target.value = target.value.slice(0, start - 1) + target.value.slice(end);
-          target.setSelectionRange(start - 1, start - 1);
-        }} else if (start === end && key === 'Delete') {{
-          target.value = target.value.slice(0, start) + target.value.slice(end + 1);
-          target.setSelectionRange(start, start);
-        }} else {{
-          target.value = target.value.slice(0, start) + target.value.slice(end);
-          target.setSelectionRange(start, start);
-        }}
-        fireInput(target, 'deleteContentBackward', null);
-        mutated = true;
-      }}
-    }} else if (key.length === 1) {{
-      // Single printable character: insert at cursor.
-      if (isNativeField) {{
-        const start = target.selectionStart ?? target.value.length;
-        const end = target.selectionEnd ?? target.value.length;
-        target.value = target.value.slice(0, start) + key + target.value.slice(end);
-        target.setSelectionRange(start + 1, start + 1);
-        fireInput(target, 'insertText', key);
-        mutated = true;
-      }} else {{
-        // contenteditable: insert at the current selection/caret.
-        const sel = window.getSelection && window.getSelection();
-        if (sel && sel.rangeCount > 0) {{
-          const range = sel.getRangeAt(0);
-          range.deleteContents();
-          range.insertNode(document.createTextNode(key));
-          range.collapse(false);
-          sel.removeAllRanges();
-          sel.addRange(range);
-        }} else {{
-          target.textContent = (target.textContent || '') + key;
-        }}
-        fireInput(target, 'insertText', key);
-        mutated = true;
-      }}
-    }}
-  }}
-
-  if (key === 'Enter' && target.form && typeof target.form.requestSubmit === 'function') {{
-    target.form.requestSubmit();
-  }} else if (key === 'Enter' && target.form && typeof target.form.submit === 'function') {{
-    target.form.submit();
-  }}
-
-  target.dispatchEvent(new KeyboardEvent('keyup', eventInit));
-  return {{ pressed: true, key, tag: target.tagName || null, mutatedValue: mutated }};
-}})();"#
-    ))
-}
-
 /// Detect the bridge's target-resolution failures without treating ordinary
-/// page errors such as `Tab is not defined` as a missing browser tab.
+/// page errors as a missing browser tab.
+///
+/// A false positive here is expensive: it both replaces the real error with a
+/// tab hint and (in `run_bridge_with_tab_recovery`) re-resolves the active tab
+/// and replays the request. `ReferenceError: Tab is not defined` must not
+/// match, and neither must page text that merely starts with a needle —
+/// "no table of contents" contains "no tab", and "Error: Table not found"
+/// contains "error: tab".
 fn missing_tab_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     [
@@ -1719,17 +2034,25 @@ fn missing_tab_error(message: &str) -> bool {
     .any(|needle| contains_phrase(&lower, needle))
 }
 
-/// Substring match that refuses hits glued to a larger token, so a page
-/// script error such as `ReferenceError: Tab is not defined` is not
-/// mistaken for a bridge target-resolution failure. Only the leading edge
-/// is guarded: bridge messages append suffixes (`... tab closed: 42`)
-/// that a trailing guard would wrongly reject.
+/// Substring match on a whole-token basis: both the leading *and* trailing
+/// edges must be non-alphanumeric (or the string boundary).
+///
+/// The leading guard stops `ReferenceError: Tab is not defined` from matching
+/// `error: tab`. The trailing guard stops `no table` from matching `no tab`
+/// and `Error: Table not found` from matching `error: tab`, while still
+/// accepting the bridge's real messages, which continue with punctuation or a
+/// space (`Error: Tab 199 no longer exists`, `tab closed: 42`).
 fn contains_phrase(haystack: &str, needle: &str) -> bool {
-    haystack.match_indices(needle).any(|(start, _)| {
-        !haystack[..start]
+    haystack.match_indices(needle).any(|(start, matched)| {
+        let leading_ok = !haystack[..start]
             .chars()
             .next_back()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+        let trailing_ok = !haystack[start + matched.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+        leading_ok && trailing_ok
     })
 }
 
@@ -1844,6 +2167,14 @@ async fn firefox_run_bridge_command_with_retry(
         .unwrap_or_else(|| anyhow::anyhow!("browser bridge command failed with no error detail")))
 }
 
+/// Hard deadline for one bridge CLI invocation.
+///
+/// `output()` waits forever, so a wedged native-messaging host (Firefox
+/// closed mid-request, a stuck pipe) parked the tool call indefinitely with no
+/// error and no way for the agent to move on. Generous, because a cold page
+/// load plus `waitForStable` legitimately takes a while, but bounded.
+const BRIDGE_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+
 async fn firefox_run_bridge_command(
     action: &str,
     params: Value,
@@ -1866,6 +2197,9 @@ async fn firefox_run_bridge_command(
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
+    // Belt-and-braces with the explicit `kill()` below, so the child dies even
+    // if this future is dropped mid-await.
+    command.kill_on_drop(true);
 
     #[cfg(not(windows))]
     if std::env::var("BROWSER_SESSION").is_err() {
@@ -1874,10 +2208,23 @@ async fn firefox_run_bridge_command(
         }
     }
 
-    let output = command
-        .output()
-        .await
+    let child = command
+        .spawn()
         .with_context(|| format!("Failed to run browser bridge action '{}'.", action))?;
+    let output = match tokio::time::timeout(BRIDGE_COMMAND_TIMEOUT, child.wait_with_output()).await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            return Err(error)
+                .with_context(|| format!("Failed to run browser bridge action '{action}'."));
+        }
+        Err(_elapsed) => {
+            anyhow::bail!(
+                "Browser bridge action '{action}' did not respond within {}s. Firefox may be showing a modal dialog, or the native bridge host is stuck. Run action='status' to check the bridge, then action='setup' to repair it.",
+                BRIDGE_COMMAND_TIMEOUT.as_secs()
+            );
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -1907,106 +2254,136 @@ async fn firefox_run_bridge_command(
     serde_json::from_str(&stdout).or_else(|_| Ok(json!({ "raw": stdout })))
 }
 
-/// RAII guard that removes the screenshot temp file on drop, so it's
-/// cleaned up whether the function returns early via `?`, panics, or
-/// completes normally. Bug fix #3 (partial leak on error paths after the
-/// file was already written by the bridge).
-struct TempFileGuard {
-    path: PathBuf,
-    disarmed: bool,
-}
-
-impl TempFileGuard {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            disarmed: false,
-        }
-    }
-
-    /// Call once the caller has taken ownership of / already deleted the
-    /// file, to skip the (now redundant, and possibly racing) drop-time
-    /// removal attempt.
-    fn disarm(&mut self) {
-        self.disarmed = true;
-    }
-}
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if self.disarmed {
-            return;
-        }
-        let path = self.path.clone();
-        // best-effort, fire-and-forget cleanup; ignore errors (file may
-        // never have been created if the bridge call failed before
-        // writing it)
-        tokio::spawn(async move {
-            let _ = tokio::fs::remove_file(&path).await;
-        });
-    }
-}
-
+/// Screenshot support.
+///
+/// The extension's `screenshot` action returns `{tabId, dataUrl, method}`
+/// where `dataUrl` is a `data:image/png;base64,...` string. There is no
+/// `filename` parameter and no `saved` result, so the previous
+/// implementation — ask the bridge to write a temp file, then look for
+/// `result.saved` — never found anything, failed to read its own temp path,
+/// attached no image, and still reported "Captured browser screenshot to
+/// <path>" for a file that did not exist. Decoding `dataUrl` also removes the
+/// temp file entirely, so there is nothing left to collide or leak.
 async fn screenshot_via_bridge(
     params: &Value,
     title: String,
     ctx: &ToolContext,
 ) -> Result<ToolOutput> {
-    let filename = temp_screenshot_path();
-    let mut guard = TempFileGuard::new(filename.clone());
+    let result = firefox_run_bridge_command("screenshot", params.clone(), ctx)
+        .await
+        .map_err(|error| enrich_browser_error("screenshot", error))?;
 
-    let mut screenshot_params = params.clone();
-    if let Some(map) = screenshot_params.as_object_mut() {
-        map.insert(
-            "filename".into(),
-            json!(filename.to_string_lossy().to_string()),
+    let mut output = ToolOutput::new(String::new())
+        .with_title(title)
+        .with_metadata(result.clone());
+
+    if let Some((media_type, base64)) = screenshot_data_url(&result) {
+        let mut metadata = merge_into_metadata_object(output.metadata.take());
+        metadata.insert(
+            "image".into(),
+            json!({"mediaType": media_type, "bytes": base64.len()}),
         );
+        output.metadata = Some(Value::Object(metadata));
+        output.output = format!(
+            "Captured a browser screenshot ({} bytes, {}).",
+            base64.len(),
+            media_type
+        );
+        return Ok(output.with_labeled_image(media_type, base64, "browser screenshot".to_string()));
     }
 
-    let result = firefox_run_bridge_command("screenshot", screenshot_params, ctx).await?;
-    let saved = result
-        .get("saved")
-        .and_then(|v| v.as_str())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| filename.clone());
-
-    // If the bridge saved somewhere other than the requested filename,
-    // make sure that path gets cleaned up too.
-    if saved != filename {
-        guard.disarm();
-    }
-    let save_guard = TempFileGuard::new(saved.clone());
-
-    let mut output = ToolOutput::new(format!(
-        "Captured browser screenshot to {}.\n\nNote: if the active model does not accept image input, the attached image is dropped by the provider — use `snapshot format=annotated` or `interactables` to verify page state instead (the text views include selectors and hrefs).",
-        saved.display()
-    ))
-    .with_title(title)
-    .with_metadata(result.clone());
-
-    if let Ok(bytes) = tokio::fs::read(&saved).await {
-        output = output.with_labeled_image(
+    // Compatibility path for a CLI build that persists the capture itself and
+    // reports where. The 1.6.0 extension does not do this, but reading it
+    // costs nothing and keeps such a build working.
+    if let Some(saved) = result.get("saved").and_then(Value::as_str)
+        && let Ok(bytes) = tokio::fs::read(saved).await
+    {
+        let _ = tokio::fs::remove_file(saved).await;
+        let encoded = STANDARD.encode(&bytes);
+        let mut metadata = merge_into_metadata_object(output.metadata.take());
+        metadata.insert(
+            "image".into(),
+            json!({"mediaType": "image/png", "bytes": bytes.len(), "savedTo": saved}),
+        );
+        output.metadata = Some(Value::Object(metadata));
+        output.output = format!("Captured a browser screenshot ({} bytes).", bytes.len());
+        return Ok(output.with_labeled_image(
             "image/png",
-            STANDARD.encode(&bytes),
-            format!("browser screenshot: {}", saved.display()),
-        );
+            encoded,
+            "browser screenshot".to_string(),
+        ));
     }
-    // save_guard drops here regardless of whether the read succeeded,
-    // ensuring cleanup on both success and failure paths.
-    drop(save_guard);
-    guard.disarm();
 
-    Ok(output)
+    anyhow::bail!(
+        "screenshot: the browser bridge returned no image data. This usually means the extension stripped the capture (the popup 'screenshot' button reports only dataUrlLength) or the tab was not capturable. Run action='status' to confirm the bridge version, then action='setup' to repair it. For page state use action='snapshot' or action='interactables', which return text and selectors instead of pixels. Bridge response: {}",
+        summarize_bridge_result(&result)
+    )
 }
 
-fn temp_screenshot_path() -> PathBuf {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let counter = SCREENSHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    std::env::temp_dir().join(format!("alphacode-browser-{}-{}-{}.png", ts, pid, counter))
+/// Extract `(media_type, base64_payload)` from a `data:...;base64,` URL.
+fn screenshot_data_url(result: &Value) -> Option<(String, String)> {
+    let data_url = result
+        .get("dataUrl")
+        .or_else(|| result.get("data_url"))
+        .and_then(Value::as_str)?;
+    let (meta, payload) = data_url.split_once(',')?;
+    if !meta.ends_with(";base64") {
+        return None;
+    }
+    let media_type = meta
+        .trim_start_matches("data:")
+        .trim_end_matches(";base64")
+        .to_ascii_lowercase();
+    if media_type.is_empty() || payload.is_empty() {
+        return None;
+    }
+    Some((
+        if media_type == "image/jpg" {
+            "image/jpeg".to_string()
+        } else {
+            media_type
+        },
+        payload.to_string(),
+    ))
+}
+
+/// Short, log-safe rendering of a bridge response for error messages: a
+/// screenshot data URL is megabytes of base64 and must never be inlined.
+fn summarize_bridge_result(result: &Value) -> String {
+    const MAX_SUMMARY: usize = 400;
+    let mut summary = String::new();
+    if let Some(object) = result.as_object() {
+        for (key, value) in object {
+            if !summary.is_empty() {
+                summary.push_str(", ");
+            }
+            match value {
+                Value::String(text) if text.len() > 80 => {
+                    summary.push_str(&format!("{key}=<string {} chars>", text.len()));
+                }
+                other => {
+                    let rendered = other.to_string();
+                    if rendered.len() > 80 {
+                        summary.push_str(&format!("{key}=<{}>", truncate_chars(&rendered, 80)));
+                    } else {
+                        summary.push_str(&format!("{key}={rendered}"));
+                    }
+                }
+            }
+        }
+    } else {
+        summary = truncate_chars(&result.to_string(), MAX_SUMMARY);
+    }
+    truncate_chars(&summary, MAX_SUMMARY)
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(3)).collect();
+    out.push_str("...");
+    out
 }
 
 fn render_browser_output(action: &str, title: String, result: Value) -> ToolOutput {
@@ -2018,9 +2395,19 @@ fn render_browser_output(action: &str, title: String, result: Value) -> ToolOutp
             .unwrap_or_else(|| serde_json::to_string_pretty(&result).unwrap_or_default()),
         "get_content" => format_content_result(&result),
         "interactables" => format_interactables_result(&result),
-        "eval" | "press" => format_eval_result(&result),
+        // Only `eval` returns `{result, type}`. `press` returns the
+        // extension's `{pressed, keys, results, element}`, which the default
+        // JSON arm renders faithfully.
+        "eval" => format_eval_result(&result),
+        "open" => format_navigate_result(&result),
         "list_cookies" => format_cookie_string_result(&result),
-        "get_cookies" => format_cookies_result(&result),
+        "get_cookies" => {
+            // Extract domain filter from result metadata if provided
+            let domain_filter = result
+                .get("domain")
+                .and_then(|v| v.as_str());
+            format_cookies_result(&result, domain_filter)
+        }
         "set_cookies" => format_set_cookies_result(&result),
         _ => serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()),
     };
@@ -2028,6 +2415,39 @@ fn render_browser_output(action: &str, title: String, result: Value) -> ToolOutp
     ToolOutput::new(body)
         .with_title(title)
         .with_metadata(result)
+}
+
+/// Render a navigation result compactly.
+///
+/// `navigate` returns `{tab: {...}}`; a pretty-printed copy of that (plus the
+/// content dump it used to include) buried the useful bits — url, title,
+/// status — under a page of JSON.
+fn format_navigate_result(result: &Value) -> String {
+    let tab = result.get("tab").unwrap_or(result);
+    let mut lines = Vec::new();
+    if let Some(tab_id) = tab_id_from_value(tab) {
+        lines.push(format!("tab_id: {tab_id}"));
+    }
+    if let Some(url) = tab.get("url").and_then(Value::as_str) {
+        lines.push(format!("url: {url}"));
+    }
+    if let Some(page_title) = tab.get("title").and_then(Value::as_str)
+        && !page_title.is_empty()
+    {
+        lines.push(format!("title: {page_title}"));
+    }
+    if let Some(status) = tab.get("status").and_then(Value::as_str) {
+        lines.push(format!("status: {status}"));
+    }
+    if lines.is_empty() {
+        return serde_json::to_string_pretty(result).unwrap_or_default();
+    }
+    lines.push(String::new());
+    lines.push(
+        "Note: use action='snapshot' (or 'get_content') to read the page; navigation no longer returns the page body to keep this result small."
+            .to_string(),
+    );
+    lines.join("\n")
 }
 
 fn format_content_result(result: &Value) -> String {
@@ -2105,15 +2525,51 @@ fn format_cookie_string_result(result: &Value) -> String {
 }
 
 /// Renders a real `get_cookies` bridge result (array of cookie objects).
-fn format_cookies_result(result: &Value) -> String {
+///
+/// When `domain_filter` is provided, only cookies whose domain contains the
+/// filter string are shown. This prevents the 60k+ token dump that happens
+/// when `get_cookies` returns every cookie from every domain.
+fn format_cookies_result(result: &Value, domain_filter: Option<&str>) -> String {
     let Some(cookies) = result.get("cookies").and_then(|v| v.as_array()) else {
         return serde_json::to_string_pretty(result).unwrap_or_default();
     };
     if cookies.is_empty() {
         return "No cookies found.".to_string();
     }
+
+    // Filter by domain if requested
+    let filtered: Vec<&Value> = if let Some(filter) = domain_filter {
+        cookies
+            .iter()
+            .filter(|c| {
+                c.get("domain")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|d| d.contains(filter))
+            })
+            .collect()
+    } else {
+        cookies.iter().collect()
+    };
+
+    if filtered.is_empty() {
+        return format!(
+            "No cookies found for domain filter '{}'. Use get_cookies without a filter to see all cookies.",
+            domain_filter.unwrap_or("")
+        );
+    }
+
     let mut lines = Vec::new();
-    for cookie in cookies {
+    if let Some(filter) = domain_filter {
+        lines.push(format!(
+            "Cookies for domain '{}' ({} of {} total):",
+            filter,
+            filtered.len(),
+            cookies.len()
+        ));
+    } else {
+        lines.push(format!("Cookies ({} total):", filtered.len()));
+    }
+    for cookie in filtered {
         let name = cookie.get("name").and_then(|v| v.as_str()).unwrap_or("?");
         let value = cookie.get("value").and_then(|v| v.as_str()).unwrap_or("");
         let domain = cookie.get("domain").and_then(|v| v.as_str()).unwrap_or("-");
@@ -2262,7 +2718,27 @@ mod tests {
         assert!(missing_tab_error("Error: Tab 199 no longer exists"));
         assert!(missing_tab_error("No active tab is available"));
         assert!(missing_tab_error("tab not found"));
+        assert!(missing_tab_error("tab closed: 42"));
         assert!(!missing_tab_error("ReferenceError: Tab is not defined"));
+    }
+
+    /// A false positive here is expensive: it swallows the real error behind a
+    /// tab hint *and* re-resolves the active tab and replays the request.
+    /// `"no tab"` sits inside "no table of contents" and `"error: tab"` inside
+    /// "Error: Table not found".
+    #[test]
+    fn missing_tab_error_ignores_page_text_that_merely_starts_the_same() {
+        for message in [
+            "Evaluate error: ReferenceError: noTable is not defined",
+            "Error: Table not found on the page",
+            "Evaluate error: TypeError: cannot read properties of undefined (reading 'tab')",
+            "TypeError: tabs is not iterable",
+        ] {
+            assert!(
+                !missing_tab_error(message),
+                "{message} must not be read as a missing tab"
+            );
+        }
     }
 
     #[test]
@@ -2317,6 +2793,412 @@ mod tests {
             let (action, _, _) = bridge_request(logical, &input).expect("bridge request");
             assert_eq!(action, wire, "logical action {logical}");
         }
+    }
+
+    /// `press` used to be routed to `evaluate` with a hand-rolled script,
+    /// which assigned `el.value` directly — invisible to React-controlled
+    /// inputs — and could not move focus (Tab) or close a dialog (Escape).
+    /// The extension ships a native `press` action; use it.
+    #[test]
+    fn press_uses_the_native_key_action_not_eval() {
+        let input = browser_input(json!({
+            "action": "press",
+            "key": "Enter",
+            "selector": "#submit",
+            "submit": true,
+        }));
+        let (action, params, _) = bridge_request("press", &input).expect("bridge request");
+        assert_eq!(action, "press");
+        assert_eq!(params["key"], "Enter");
+        assert_eq!(params["submit"], true);
+        assert_eq!(params["selector"], "#submit");
+        assert!(
+            params.get("script").is_none(),
+            "press must not be smuggled through evaluate"
+        );
+    }
+
+    #[test]
+    fn press_requires_a_key() {
+        let input = browser_input(json!({"action": "press"}));
+        let error = bridge_request("press", &input).expect_err("missing key");
+        assert!(error.to_string().contains("key is required"), "{error}");
+    }
+
+    /// `typeInto` in the content script never reads a `submit` param, so
+    /// forwarding it was a lie. The submit is now a separate native Enter
+    /// press issued after the text lands, so it must not be sent with `type`.
+    #[test]
+    fn type_does_not_forward_a_dead_submit_param() {
+        let input = browser_input(json!({
+            "action": "type",
+            "text": "hello",
+            "submit": true,
+        }));
+        let (action, params, _) = bridge_request("type", &input).expect("bridge request");
+        assert_eq!(action, "type");
+        assert_eq!(params["text"], "hello");
+        assert!(
+            params.get("submit").is_none(),
+            "the content script ignores type/submit; the Enter press handles it"
+        );
+    }
+
+    /// `fillForm` *does* honor a top-level `submit`, unlike `typeInto`.
+    #[test]
+    fn fill_form_forwards_submit_because_the_bridge_reads_it() {
+        let input = browser_input(json!({
+            "action": "fill_form",
+            "fields": [{"selector": "#q", "value": "x"}],
+            "submit": true,
+        }));
+        let (action, params, _) = bridge_request("fill_form", &input).expect("bridge request");
+        assert_eq!(action, "fillForm");
+        assert_eq!(params["submit"], true);
+    }
+
+    /// The content script clamps with `maxChars` / `textMaxChars`;
+    /// `maxLength` appears nowhere in the extension, so the documented cap
+    /// used to be silently ignored for every format.
+    #[test]
+    fn get_content_sends_the_extension_length_keys() {
+        let input = browser_input(json!({
+            "action": "get_content",
+            "format": "text",
+            "max_length": 1234,
+        }));
+        let (_, params, _) = bridge_request("get_content", &input).expect("bridge request");
+        assert_eq!(params["maxChars"], 1234);
+        assert!(params.get("maxLength").is_none());
+
+        let annotated = browser_input(json!({
+            "action": "get_content",
+            "format": "annotated",
+            "max_length": 999,
+        }));
+        let (_, params, _) = bridge_request("get_content", &annotated).expect("bridge request");
+        assert_eq!(params["maxChars"], 999);
+        assert_eq!(
+            params["textMaxChars"], 999,
+            "the annotated text section has its own cap"
+        );
+
+        // html keeps the historical 60k default; text keeps none.
+        let html = browser_input(json!({"action": "get_content", "format": "html"}));
+        let (_, params, _) = bridge_request("get_content", &html).expect("bridge request");
+        assert_eq!(params["maxChars"], 60_000);
+        let plain = browser_input(json!({"action": "get_content", "format": "text"}));
+        let (_, params, _) = bridge_request("get_content", &plain).expect("bridge request");
+        assert!(params.get("maxChars").is_none());
+    }
+
+    /// `waitFor` has no quiet-period mode, and `domStable`/`networkIdle` match
+    /// nothing in the extension, so those waits silently degraded into a
+    /// readyState check. They must select the `waitForStable` action.
+    #[test]
+    fn wait_quiet_period_modes_route_to_wait_for_stable() {
+        for position in ["dom-stable", "network-idle"] {
+            let input = browser_input(json!({
+                "action": "wait",
+                "position": position,
+                "timeout_ms": 5000,
+            }));
+            let (action, params, _) = bridge_request("wait", &input).expect("bridge request");
+            assert_eq!(action, "waitForStable", "position {position}");
+            assert_eq!(params["timeoutMs"], 5000);
+            assert!(params.get("domStable").is_none());
+            assert!(params.get("networkIdle").is_none());
+        }
+
+        // A target wait still uses `waitFor`.
+        let input = browser_input(json!({"action": "wait", "text": "Loaded"}));
+        let (action, _, _) = bridge_request("wait", &input).expect("bridge request");
+        assert_eq!(action, "waitFor");
+    }
+
+    #[test]
+    fn wait_rejects_an_unknown_position() {
+        let input = browser_input(json!({"action": "wait", "position": "dom-stabel"}));
+        let error = bridge_request("wait", &input).expect_err("typo'd position");
+        assert!(error.to_string().contains("dom-stabel"), "{error}");
+    }
+
+    /// `wait` with nothing but `timeout_ms` must be honored locally: the
+    /// extension's `waitFor` resolves a targetless request against
+    /// `document.readyState`, which is already true, so it returned instantly.
+    #[test]
+    fn bare_timeout_wait_is_detected_as_a_fixed_delay() {
+        let delay = browser_input(json!({"action": "wait", "timeout_ms": 750}));
+        assert!(is_fixed_delay_wait(&delay));
+
+        // A target means it is a real bridge wait.
+        for extra in [
+            json!({"selector": "#done"}),
+            json!({"text": "Done"}),
+            json!({"contains": "Done"}),
+            json!({"position": "dom-stable"}),
+        ] {
+            let mut value = json!({"action": "wait", "timeout_ms": 750});
+            value
+                .as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            let input = browser_input(value);
+            assert!(
+                !is_fixed_delay_wait(&input),
+                "{extra} should not be a bare delay"
+            );
+        }
+    }
+
+    /// The extension reads `files: [{name, type, data}]` with base64 data;
+    /// `filePath` appears nowhere in it, so every upload failed with
+    /// "uploadFile requires file or files".
+    #[tokio::test]
+    async fn upload_sends_inline_base64_files() {
+        let dir =
+            std::env::temp_dir().join(format!("alphacode-upload-test-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.expect("temp dir");
+        let path = dir.join("payload.json");
+        tokio::fs::write(&path, br#"{"a":1}"#)
+            .await
+            .expect("write fixture");
+
+        let input = browser_input(json!({
+            "action": "upload",
+            "path": path.to_string_lossy(),
+            "selector": "input[type=file]",
+        }));
+        let mut params = upload_params(&input).await.expect("upload params");
+        apply_common_targeting(&mut params, &input);
+
+        let files = params["files"].as_array().expect("files array");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["name"], "payload.json");
+        assert_eq!(files[0]["type"], "application/json");
+        assert_eq!(files[0]["data"], STANDARD.encode(br#"{"a":1}"#));
+        assert_eq!(params["selector"], "input[type=file]");
+        assert!(
+            params.get("filePath").is_none(),
+            "filePath is not a bridge parameter"
+        );
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn upload_reports_a_missing_file_clearly() {
+        let input = browser_input(json!({
+            "action": "upload",
+            "path": "/definitely/not/here/alphacode-missing.bin",
+        }));
+        let error = upload_params(&input)
+            .await
+            .expect_err("missing file must fail");
+        assert!(error.to_string().contains("no such file"), "{error}");
+    }
+
+    #[test]
+    fn media_type_inference_covers_common_uploads() {
+        assert_eq!(media_type_for("a/b/report.pdf"), "application/pdf");
+        assert_eq!(media_type_for("shot.PNG"), "image/png");
+        assert_eq!(media_type_for("notes.txt"), "text/plain");
+        assert_eq!(media_type_for("noextension"), "application/octet-stream");
+    }
+
+    /// The reported failure was `Browser bridge action 'uploadFile' failed:
+    /// Error: uploadFile requires file or files` — the extension rejecting a
+    /// payload that carried a path instead of inline bytes.
+    #[test]
+    fn upload_bridge_error_names_the_inline_bytes_requirement() {
+        let error = enrich_browser_error(
+            "upload",
+            anyhow::anyhow!(
+                "Browser bridge action 'uploadFile' failed: Error: uploadFile requires file or files"
+            ),
+        );
+        let message = error.to_string();
+        assert!(message.contains("files"), "{message}");
+        assert!(message.contains("base64"), "{message}");
+    }
+
+    #[test]
+    fn upload_missing_file_input_suggests_finding_the_input() {
+        let error = enrich_browser_error(
+            "upload",
+            anyhow::anyhow!(
+                "Browser bridge action 'uploadFile' failed: Error: No file input found"
+            ),
+        );
+        let message = error.to_string();
+        assert!(message.contains("interactables"), "{message}");
+        assert!(message.contains("selector"), "{message}");
+    }
+
+    /// `screenshot` returns `{tabId, dataUrl, method}`; the old code looked
+    /// for a `saved` path that never exists and reported a temp file the
+    /// bridge never wrote.
+    #[test]
+    fn screenshot_decodes_the_data_url_the_bridge_actually_returns() {
+        let result = json!({
+            "tabId": 12,
+            "method": "captureTab",
+            "dataUrl": "data:image/png;base64,aGVsbG8=",
+        });
+        let (media_type, payload) = screenshot_data_url(&result).expect("data url");
+        assert_eq!(media_type, "image/png");
+        assert_eq!(payload, "aGVsbG8=");
+        assert_eq!(
+            STANDARD.decode(payload).expect("decode"),
+            b"hello".to_vec(),
+            "the payload is already base64 and must be passed through as-is"
+        );
+    }
+
+    #[test]
+    fn screenshot_rejects_a_non_base64_or_missing_data_url() {
+        assert!(screenshot_data_url(&json!({"dataUrl": "data:image/png,raw"})).is_none());
+        assert!(screenshot_data_url(&json!({"dataUrl": "data:image/png;base64,"})).is_none());
+        assert!(screenshot_data_url(&json!({"tabId": 3, "method": "captureTab"})).is_none());
+    }
+
+    #[test]
+    fn bridge_error_summaries_never_inline_a_data_url() {
+        let result = json!({
+            "tabId": 3,
+            "method": "captureTab",
+            "dataUrl": format!("data:image/png;base64,{}", "A".repeat(5_000)),
+        });
+        let summary = summarize_bridge_result(&result);
+        assert!(summary.contains("dataUrl=<string"), "{summary}");
+        assert!(!summary.contains("AAAAA"), "must not inline the payload");
+    }
+
+    /// `open` used to return (and render) a full annotated content dump.
+    #[test]
+    fn open_suppresses_the_content_dump_and_renders_a_summary() {
+        let input = browser_input(json!({"action": "open", "url": "https://example.test"}));
+        let (_, params, _) = bridge_request("open", &input).expect("bridge request");
+        assert_eq!(params["returnContent"], false);
+
+        let rendered = format_navigate_result(&json!({"tab": {
+            "tabId": 4,
+            "url": "https://example.test/ok",
+            "title": "OK",
+            "status": "complete",
+        }}));
+        assert!(rendered.contains("tab_id: 4"), "{rendered}");
+        assert!(
+            rendered.contains("url: https://example.test/ok"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("status: complete"), "{rendered}");
+        assert!(rendered.contains("snapshot"), "{rendered}");
+    }
+
+    #[test]
+    fn schema_action_enum_matches_known_actions() {
+        let schema = BrowserTool::new().parameters_schema();
+        let published = schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum")
+            .iter()
+            .map(|value| value.as_str().expect("string").to_string())
+            .collect::<Vec<_>>();
+        let known = KNOWN_ACTIONS
+            .iter()
+            .map(|action| (*action).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            published, known,
+            "the published action enum and the dispatch table must not drift"
+        );
+    }
+
+    #[test]
+    fn unknown_action_is_rejected_by_name() {
+        let input = browser_input(json!({"action": "clik"}));
+        let error = bridge_request("clik", &input).expect_err("unknown action");
+        let message = error.to_string();
+        assert!(
+            message.contains("Unsupported browser action: 'clik'"),
+            "{message}"
+        );
+        assert!(message.contains("Valid actions"), "{message}");
+    }
+
+    #[test]
+    fn provider_command_forwards_the_callers_wire_action() {
+        let input = browser_input(json!({
+            "action": "provider_command",
+            "provider_action": "saveAsPDF",
+            "params": {"landscape": true},
+        }));
+        let (action, params, _) =
+            bridge_request("provider_command", &input).expect("bridge request");
+        assert_eq!(action, "saveAsPDF");
+        assert_eq!(params, json!({"landscape": true}));
+
+        let missing = browser_input(json!({"action": "provider_command"}));
+        let error = bridge_request("provider_command", &missing).expect_err("no provider action");
+        assert!(
+            error.to_string().contains("provider_action is required"),
+            "{error}"
+        );
+    }
+
+    /// The pin map used to grow one entry per session forever and silently
+    /// stop working entirely if the mutex was ever poisoned.
+    #[test]
+    fn session_tab_pins_stay_bounded_and_keep_working() {
+        let existing = {
+            let guard = session_tab_pins();
+            guard.as_ref().map(|pins| pins.len()).unwrap_or_default()
+        };
+        for index in 0..(MAX_TRACKED_SESSION_TABS + 32) {
+            remember_session_tab(&format!("bounded-session-{index}"), index as i64);
+        }
+        let total = session_tab_pins()
+            .as_ref()
+            .map(|pins| pins.len())
+            .unwrap_or_default();
+        assert!(
+            total <= MAX_TRACKED_SESSION_TABS,
+            "pin map must stay bounded, got {total}"
+        );
+        // The most recent pin is always the one that survives.
+        let newest = MAX_TRACKED_SESSION_TABS + 31;
+        assert_eq!(
+            session_tab_pin(&format!("bounded-session-{newest}")),
+            Some(newest as i64)
+        );
+        // Leave the map roughly as we found it for the other pin tests.
+        for index in 0..(MAX_TRACKED_SESSION_TABS + 32) {
+            forget_session_tab(&format!("bounded-session-{index}"), index as i64);
+        }
+        let after = session_tab_pins()
+            .as_ref()
+            .map(|pins| pins.len())
+            .unwrap_or_default();
+        assert!(after <= existing.max(1), "cleanup left {after} pins behind");
+    }
+
+    #[test]
+    fn session_tab_pins_survive_a_poisoned_mutex() {
+        // A poisoned lock used to be swallowed, which silently disabled tab
+        // pinning for the rest of the process.
+        static POISON: Mutex<()> = Mutex::new(());
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = POISON.lock().expect("poison");
+            panic!("poison the pin mutex on purpose");
+        });
+        assert!(POISON.lock().is_err(), "the mutex should be poisoned now");
+        POISON.clear_poison();
+
+        let session = "poison-recovery-session";
+        remember_session_tab(session, 4321);
+        assert_eq!(session_tab_pin(session), Some(4321));
+        forget_session_tab(session, 4321);
     }
 
     #[test]
@@ -2495,12 +3377,13 @@ mod tests {
         let session = "pin-apply-test-session";
         remember_session_tab(session, 55);
 
-        let mut params = Map::new();
+        // `apply_session_tab_pin` takes the serialized params (`&mut Value`),
+        // which is what `execute_firefox_action` has on hand.
+        let mut params = Value::Object(Map::new());
         assert!(apply_session_tab_pin(&mut params, session));
         assert_eq!(params["tabId"], 55);
 
-        let mut explicit = Map::new();
-        explicit.insert("tabId".into(), json!(77));
+        let mut explicit = Value::Object(Map::from_iter([("tabId".to_string(), json!(77))]));
         assert!(!apply_session_tab_pin(&mut explicit, session));
         assert_eq!(explicit["tabId"], 77);
 
@@ -2547,6 +3430,108 @@ mod tests {
             assert!(
                 !TAB_SCOPED_MUTATING_ACTIONS.contains(&action),
                 "{action} must stay allowed without a pin"
+            );
+        }
+    }
+
+    /// The extension's `captureVisibleTab` fallback does
+    /// `tabs.update(tabId, {active: true})`, so an untargeted screenshot
+    /// raises the tab in front of the user — it is not the pure read it looks
+    /// like. `screenshot` is tab-scoped for exactly that reason.
+    #[test]
+    fn screenshot_is_tab_scoped_because_it_can_raise_the_users_tab() {
+        assert!(TAB_SCOPED_MUTATING_ACTIONS.contains(&"screenshot"));
+    }
+
+    /// `open` with `new_tab: false` and no tab target reaches the extension's
+    /// `resolveTabId({})` branch and navigates the user's active tab, so the
+    /// guard in `execute_firefox_action` has to cover that case even though
+    /// `open` is not in the list above.
+    #[test]
+    fn in_place_open_is_detected_as_tab_scoped() {
+        let input = browser_input(json!({
+            "action": "open",
+            "url": "https://example.test",
+            "new_tab": false,
+        }));
+        let (_, params, _) = bridge_request("open", &input).expect("bridge request");
+        assert_eq!(params["newTab"], false);
+        assert!(params.get("tabId").is_none());
+        assert!(
+            params["newTab"] == json!(false),
+            "the guard keys off exactly this value"
+        );
+
+        // The default (own new tab) and an explicit tab target stay allowed.
+        let fresh = browser_input(json!({"action": "open", "url": "https://example.test"}));
+        let (_, params, _) = bridge_request("open", &fresh).expect("bridge request");
+        assert_eq!(params["newTab"], true);
+        let targeted = browser_input(json!({
+            "action": "open",
+            "url": "https://example.test",
+            "tab_id": 3,
+        }));
+        let (_, params, _) = bridge_request("open", &targeted).expect("bridge request");
+        assert_eq!(params["tabId"], 3);
+    }
+
+    /// `set_cookies` is not tab-scoped: `cookieAction` addresses cookies by
+    /// url/domain and never resolves a tab, so it must not need a pin.
+    #[test]
+    fn cookie_actions_are_not_tab_scoped() {
+        for action in [
+            "get_cookies",
+            "set_cookies",
+            "delete_cookie",
+            "list_cookies",
+        ] {
+            assert!(
+                !TAB_SCOPED_MUTATING_ACTIONS.contains(&action),
+                "{action} is url-addressed, not tab-addressed"
+            );
+        }
+    }
+
+    /// Only idempotent reads may be retried — a retried click/type could
+    /// double-submit.
+    #[test]
+    fn only_idempotent_reads_are_retryable() {
+        for action in [
+            "click",
+            "type",
+            "press",
+            "fill_form",
+            "select",
+            "drag_and_drop",
+            "scroll",
+            "upload",
+            "eval",
+            "set_cookies",
+            "delete_cookie",
+            "close_tab",
+            "reload",
+            "go_back",
+            "go_forward",
+        ] {
+            assert!(
+                !RETRYABLE_ACTIONS.contains(&action),
+                "{action} must never be retried automatically"
+            );
+        }
+        for action in [
+            "status",
+            "list_tabs",
+            "get_active_tab",
+            "list_frames",
+            "get_content",
+            "interactables",
+            "snapshot",
+            "wait",
+            "get_cookies",
+        ] {
+            assert!(
+                RETRYABLE_ACTIONS.contains(&action),
+                "{action} is a read and may be retried"
             );
         }
     }

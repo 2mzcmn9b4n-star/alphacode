@@ -491,10 +491,9 @@ pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
 /// collapsing internal newlines to spaces for a single-line preview.
 /// When truncated, appends an ellipsis.
 fn truncate_preview(text: &str, max_chars: usize) -> String {
-    use unicode_width::UnicodeWidthStr;
     let single_line: String = text.replace('\n', " ");
     let trimmed = single_line.trim();
-    if trimmed.width() <= max_chars {
+    if unicode_width::UnicodeWidthStr::width(trimmed) <= max_chars {
         trimmed.to_string()
     } else {
         let limit = max_chars.saturating_sub(3);
@@ -1349,6 +1348,20 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
     };
 
     crate::memory::check_staleness();
+
+    // Subtle background highlight for the status line to visually separate it
+    // from the transcript above. Uses a very dim brand-tinted background.
+    if area.height > 0 && area.width > 0 {
+        let status_bg = ratatui::style::Color::Rgb(18, 20, 28);
+        for x in area.left()..area.right() {
+            for y in area.top()..area.bottom() {
+                let cell = &mut frame.buffer_mut()[(x, y)];
+                if cell.symbol() == " " || cell.symbol().is_empty() {
+                    cell.set_bg(status_bg);
+                }
+            }
+        }
+    }
 
     if app.centered_mode() {
         frame.render_widget(Paragraph::new(line.alignment(Alignment::Center)), area);
@@ -3125,6 +3138,22 @@ pub(super) fn draw_input(
         }
     }
 
+    // Subtle top border on the input area for visual separation from the
+    // transcript above. Uses a dim gradient that matches the brand theme.
+    if area.height > 0 && area.width > 2 {
+        let border_line = crate::alphacode_tui::tui::brand_ux::BrandTheme::breathing_separator(
+            area.width as usize,
+            app.animation_elapsed(),
+        );
+        let border_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(border_line), border_area);
+    }
+
     let paragraph = if centered {
         Paragraph::new(
             lines
@@ -3175,8 +3204,6 @@ fn input_copy_snapshot_parts(
     input: &str,
     line_width: usize,
 ) -> (Vec<String>, Vec<String>, Vec<super::WrappedLineMap>) {
-    use unicode_width::UnicodeWidthChar;
-
     let segments = wrap_input_segments(input, line_width);
     let raw_lines: Vec<String> = input.split('\n').map(str::to_owned).collect();
 
@@ -3190,7 +3217,7 @@ fn input_copy_snapshot_parts(
             raw_line += 1;
             col = 0;
         } else {
-            col += ch.width().unwrap_or(0);
+            col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
         }
         boundaries.push((raw_line, col));
     }
@@ -3213,8 +3240,6 @@ fn input_copy_snapshot_parts(
 }
 
 fn wrap_input_segments(input: &str, line_width: usize) -> Vec<WrappedInputSegment> {
-    use unicode_width::UnicodeWidthChar;
-
     let chars: Vec<char> = input.chars().collect();
     if chars.is_empty() {
         return vec![WrappedInputSegment {
@@ -3242,7 +3267,7 @@ fn wrap_input_segments(input: &str, line_width: usize) -> Vec<WrappedInputSegmen
             let mut display_width = 0;
             let mut end = seg_pos;
             while end < segment.len() {
-                let cw = segment[end].width().unwrap_or(0);
+                let cw = unicode_width::UnicodeWidthChar::width(segment[end]).unwrap_or(0);
                 if display_width + cw > line_width {
                     break;
                 }
@@ -3251,7 +3276,8 @@ fn wrap_input_segments(input: &str, line_width: usize) -> Vec<WrappedInputSegmen
             }
             if end == seg_pos && seg_pos < segment.len() {
                 end = seg_pos + 1;
-                display_width = segment[seg_pos].width().unwrap_or(0);
+                display_width =
+                    unicode_width::UnicodeWidthChar::width(segment[seg_pos]).unwrap_or(0);
             }
 
             let text: String = segment[seg_pos..end].iter().collect();
@@ -3283,20 +3309,16 @@ fn wrap_input_segments(input: &str, line_width: usize) -> Vec<WrappedInputSegmen
 }
 
 fn cursor_col_for_segment(segment: &WrappedInputSegment, cursor_char_pos: usize) -> usize {
-    use unicode_width::UnicodeWidthChar;
-
     let chars_before = cursor_char_pos.saturating_sub(segment.start_char);
     segment
         .text
         .chars()
         .take(chars_before)
-        .map(|c| c.width().unwrap_or(0))
+        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
         .sum()
 }
 
 fn char_offset_for_clicked_column(text: &str, target_col: usize, display_width: usize) -> usize {
-    use unicode_width::UnicodeWidthChar;
-
     if target_col >= display_width {
         return text.chars().count();
     }
@@ -3304,7 +3326,7 @@ fn char_offset_for_clicked_column(text: &str, target_col: usize, display_width: 
     let mut display_col = 0;
     let mut chars_before = 0;
     for c in text.chars() {
-        let cw = c.width().unwrap_or(0);
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         if cw == 0 {
             chars_before += 1;
             continue;

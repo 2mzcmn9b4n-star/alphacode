@@ -2,9 +2,14 @@ use super::*;
 
 pub struct IncrementalMarkdownRenderer {
     /// Previously rendered lines, shared so streaming hits avoid a deep
-    /// `Vec<Line>` clone per token batch. `rendered_lines` mirrors the Arc
-    /// for legacy `update()` callers; new code should use `update_shared()`.
-    rendered_lines: Vec<Line<'static>>,
+    /// `Vec<Line>` clone per token batch.
+    ///
+    /// This is the single owner of the rendered lines. It used to be mirrored
+    /// into a second `Vec<Line>` field for the sake of `last_lines()`, but that
+    /// mirror was deep-cloned on *every* streaming frame (the one place where
+    /// the line count grows largest) and `last_lines()` had no callers, so the
+    /// mirror was pure duplicated memory plus duplicated work. `last_lines()`
+    /// now borrows straight from this `Arc`.
     rendered_shared: std::sync::Arc<Vec<Line<'static>>>,
     /// Text that was rendered (for comparison)
     rendered_text: String,
@@ -14,12 +19,12 @@ pub struct IncrementalMarkdownRenderer {
     lines_at_checkpoint: usize,
     /// Whether a blank separator should be preserved at the checkpoint boundary
     checkpoint_needs_separator: bool,
-    /// Whether `rendered_lines` contains a deferred-mermaid pending
+    /// Whether the cached lines contain a deferred-mermaid pending
     /// placeholder; when true the identical-text fast path must re-render
     /// once the deferred render epoch advances so the completed diagram
     /// replaces the placeholder.
     rendered_mermaid_pending: bool,
-    /// Deferred-render epoch observed just before `rendered_lines` was
+    /// Deferred-render epoch observed just before the cached lines were
     /// rendered.
     rendered_mermaid_epoch: u64,
     /// Width constraint
@@ -29,7 +34,6 @@ pub struct IncrementalMarkdownRenderer {
 impl IncrementalMarkdownRenderer {
     pub fn new(max_width: Option<usize>) -> Self {
         Self {
-            rendered_lines: Vec::new(),
             rendered_shared: std::sync::Arc::new(Vec::new()),
             rendered_text: String::new(),
             last_checkpoint: 0,
@@ -60,14 +64,14 @@ impl IncrementalMarkdownRenderer {
 
     /// Borrow the last rendered lines without cloning.
     pub fn last_lines(&self) -> &[Line<'static>] {
-        &self.rendered_lines
+        &self.rendered_shared
     }
 
     pub fn debug_memory_profile(&self) -> serde_json::Value {
-        let rendered_lines_estimate_bytes = estimate_lines_bytes(&self.rendered_lines);
+        let rendered_lines_estimate_bytes = estimate_lines_bytes(&self.rendered_shared);
         let rendered_text_bytes = self.rendered_text.capacity();
         serde_json::json!({
-            "rendered_lines_count": self.rendered_lines.len(),
+            "rendered_lines_count": self.rendered_shared.len(),
             "rendered_lines_estimate_bytes": rendered_lines_estimate_bytes,
             "rendered_text_bytes": rendered_text_bytes,
             "last_checkpoint": self.last_checkpoint,
@@ -116,11 +120,11 @@ impl IncrementalMarkdownRenderer {
         // Reuse the text buffer capacity across streaming deltas.
         self.rendered_text.clear();
         self.rendered_text.push_str(full_text);
-        self.rendered_lines = lines;
-        self.rendered_shared = std::sync::Arc::new(std::mem::take(&mut self.rendered_lines));
-        // Keep the `Vec` mirror for `last_lines()` without a second deep clone
-        // on the next fast path: clone once here, share afterwards.
-        self.rendered_lines = self.rendered_shared.as_ref().clone();
+        // The freshly rendered lines are handed straight to the `Arc`. There is
+        // deliberately no second `Vec` mirror: the renderer is the only owner,
+        // so this is a move, and the previous contents of `rendered_shared` are
+        // dropped here rather than being deep-copied on every frame.
+        self.rendered_shared = std::sync::Arc::new(lines);
 
         // Find checkpoint for next incremental update
         self.refresh_checkpoint(full_text, true);
@@ -267,14 +271,13 @@ impl IncrementalMarkdownRenderer {
 
     /// Reset the renderer state
     pub fn reset(&mut self) {
-        self.rendered_lines.clear();
         self.rendered_shared = std::sync::Arc::new(Vec::new());
         self.rendered_text.clear();
         self.last_checkpoint = 0;
         self.lines_at_checkpoint = 0;
         self.checkpoint_needs_separator = false;
         self.rendered_mermaid_pending = false;
-        self.rendered_mermaid_epoch = 0;
+        self.rendered_mermaid_epoch = crate::alphacode_tui_mermaid::deferred_render_epoch();
     }
 
     /// Update width constraint, resets if changed

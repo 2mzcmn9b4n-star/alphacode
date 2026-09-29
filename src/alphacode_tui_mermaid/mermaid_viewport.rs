@@ -526,7 +526,8 @@ fn kitty_diacritic(index: u16) -> char {
     KITTY_DIACRITICS
         .get(index as usize)
         .copied()
-        .unwrap_or(KITTY_DIACRITICS[0])
+        .or_else(|| KITTY_DIACRITICS.first().copied())
+        .unwrap_or(' ')
 }
 
 /// From https://sw.kovidgoyal.net/kitty/_downloads/1792bad15b12979994cd6ecc54c967a6/rowcolumn-diacritics.txt

@@ -113,14 +113,15 @@ impl SessionPicker {
                 continue;
             }
             let needle: Vec<char> = token.chars().collect();
+            let needle_len = needle.len();
             let mut i = 0;
-            while i + needle.len() <= lower_chars.len() {
-                if lower_chars[i..i + needle.len()] == needle[..] {
-                    for slot in mask.iter_mut().skip(i).take(needle.len()) {
+            while i + needle_len <= lower_chars.len() {
+                if lower_chars[i..i + needle_len] == needle[..] {
+                    for slot in mask.iter_mut().skip(i).take(needle_len) {
                         *slot = true;
                     }
                     any = true;
-                    i += needle.len();
+                    i += needle_len;
                 } else {
                     i += 1;
                 }

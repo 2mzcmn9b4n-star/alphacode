@@ -4,6 +4,7 @@ mod budget_enforcer;
 mod claim_checker;
 mod compaction;
 mod environment;
+pub(crate) mod free_pool_rotation;
 mod goal_evaluator;
 mod inline_tail;
 mod interrupts;

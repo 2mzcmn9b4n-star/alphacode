@@ -453,7 +453,7 @@ pub(super) fn format_elapsed(secs: f32) -> String {
         let text = text.trim_end_matches('0');
         let text = text.strip_suffix('.').unwrap_or(text);
         format!("{text}s")
-    } else if secs == 0.0 {
+    } else if secs.abs() < f32::EPSILON {
         "0.00s".to_string()
     } else {
         format!("{:.1}s", secs)

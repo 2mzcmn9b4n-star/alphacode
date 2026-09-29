@@ -142,9 +142,13 @@ pub struct ResolvedOpenAiCompatibleProfile {
 }
 
 mod catalog;
+pub mod free_pool;
 
 pub use catalog::*;
+// Re-exported at the crate root as well as under `free_pool` so callers can use
+// whichever path reads better at the call site; both resolve to the same items.
 use catalog::{LOGIN_PROVIDERS, OPENAI_COMPAT_PROFILES};
+pub use free_pool::*;
 
 pub fn openai_compatible_profiles() -> &'static [OpenAiCompatibleProfile] {
     &OPENAI_COMPAT_PROFILES

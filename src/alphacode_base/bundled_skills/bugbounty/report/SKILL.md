@@ -134,15 +134,26 @@ Severity: [Critical/High/Medium/Low/Info]
 | Low | 0.1-3.9 | Info disclosure, Limited impact findings |
 | Info | 0.0 | Best practice violations (only if chained) |
 
-### HackerOne Severity Guidelines
+### Severity Justification
 
-| Severity | Typical Payout | Examples |
-|----------|---------------|----------|
-| Critical | $5,000-$50,000+ | RCE, Full ATO, SQLi, SSRF→RCE |
-| High | $2,000-$10,000 | Stored XSS, SSRF, IDOR with sensitive data |
-| Medium | $500-$2,000 | CSRF, Open Redirect, Limited IDOR |
-| Low | $100-$500 | Info disclosure, Limited impact |
-| None | $0-100 | Best practice (chained only) |
+Pick severity from the **impact you demonstrated**, and show the reasoning so
+the owner (or triager) can disagree with evidence rather than opinion:
+
+| Demonstrated impact | Typical severity |
+|---------------------|------------------|
+| RCE, or auth bypass taking over arbitrary accounts | Critical |
+| Read/write access to other users' sensitive data, privilege escalation | High |
+| CSRF on a meaningful action, open redirect on a trusted origin, limited cross-tenant read | Medium |
+| Minor information exposure with no sensitive data | Low |
+| Hardening gaps with no demonstrated impact | Info (usually not worth a report on its own) |
+
+Two rules that keep reports honest:
+- **Do not inflate.** If you proved a read-only IDOR, it is not Critical just
+  because write access might exist. State the demonstrated severity.
+- **Do not under-report by timidity.** A proven high-impact bug reported as
+  "medium, probably" is as wrong as inflation — say what you showed.
+- **Chains are notes, not severity.** "This may compound with an XSS on the
+  same origin" belongs in an analyst note, not in the impact score.
 
 ---
 
@@ -263,8 +274,8 @@ analysis (full templates live in the evidence-locker skill):
 ### Immunefi
 - https://immunefi.com
 - Web3/DeFi focused
-- Higher bounties for critical findings
 - Follow their disclosure policy
+- Report demonstrated impact; do not inflate a theoretical drain into a Critical
 
 ---
 

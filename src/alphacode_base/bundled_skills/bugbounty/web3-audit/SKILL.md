@@ -1,31 +1,34 @@
 ---
 name: web3-audit
-description: Smart contract security audit — 10 DeFi bug classes (accounting desync, access control, incomplete path, off-by-one, oracle, ERC4626, reentrancy, flash loan, signature replay, proxy), pre-dive kill signals (TVL < $500K etc), Foundry PoC template, grep patterns for each class, and real Immunefi paid examples. Use for any Solidity/Rust contract audit or when deciding whether a DeFi target is worth hunting.
+description: Smart contract security audit — 10 DeFi bug classes (accounting desync, access control, incomplete path, off-by-one, oracle, ERC4626, reentrancy, flash loan, signature replay, proxy), scope/feasibility kill signals, Foundry PoC template, and grep patterns for each class. Use for any Solidity/Rust contract audit or when judging whether a DeFi review is worth the effort.
 ---
 
 # WEB3 SMART CONTRACT AUDIT
 
-10 bug classes. Pre-dive kill signals. Foundry PoC template. Real paid examples.
+10 bug classes. Feasibility kill signals. Foundry PoC template. Real examples.
 
 ---
 
-## PRE-DIVE KILL SIGNALS (check BEFORE any code review)
+## PRE-DIVE FEASIBILITY SIGNALS (check BEFORE any code review)
 
 > ZKsync lesson: $322M TVL + OZ audit + 750K LOC + 5 sessions = 0 findings. Large well-audited bridges are extremely hard.
 
-1. **TVL < $500K** → max payout capped too low for effort
-2. **2+ top-tier audits** (Halborn, ToB, Cyfrin, OpenZeppelin) on simple protocol → bugs already found
-3. **Protocol < 500 lines, single A→B→C flow** → minimal attack surface
-4. **Formula**: `max_realistic_payout = min(10% × TVL, program_cap)` — if < $10K, skip
+Judge these on **review value**, not on payout:
 
-**Target scoring (go if >= 6/10):**
-- TVL > $10M: +2
-- Immunefi program with Critical >= $50K: +2
+1. **< 500 LOC with a single A→B→C flow** → minimal attack surface
+2. **2+ top-tier audits** (Halborn, ToB, Cyfrin, OpenZeppelin) on simple protocol → likely already found
+3. **Immutable, non-upgradeable, no external calls** → small reachable surface
+4. **Only review what the user asked you to review.** Do not abandon a
+   low-value contract because the bounty is small — if the user asked for an
+   audit, the audit is the deliverable, not the payout.
+
+**Scope scoring (proceed if >= 6/10):**
+- Source verified + reproducible build: +2
 - No top-tier audit on current version: +2
+- Upgradeable proxy or role-based admin: +2
+- External calls, oracles, or flash-loan relevant: +2
 - < 30 days since deploy: +1
-- Protocol you've hunted before: +1
 - Source code + natspec comments: +1
-- Upgradeable proxies: +1
 
 ---
 

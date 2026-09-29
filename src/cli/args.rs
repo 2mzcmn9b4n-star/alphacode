@@ -482,6 +482,13 @@ pub(crate) enum Command {
         coverage_limit: usize,
     },
 
+    /// Inspect and install the bug-bounty / recon toolchain (subfinder, httpx,
+    /// katana, ffuf, dnsx, gau, waybackurls, nuclei, ...).
+    BugBounty {
+        #[command(subcommand)]
+        command: BugBountyCommand,
+    },
+
     /// Diagnose why a provider/model or the model picker is broken by walking the
     /// strict end-to-end checkpoints (catalog, picker, model-switch, chat, streaming, tools).
     #[command(name = "provider-doctor", alias = "provider-strict-e2e")]
@@ -1085,6 +1092,69 @@ pub(crate) enum AuthCommand {
         validate: bool,
 
         /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum BugBountyCommand {
+    /// Orchestrate a complete bug bounty workflow against a target.
+    /// Runs the full pipeline: recon → attack surface mapping → vuln discovery → exploitation.
+    Orchestrate {
+        /// Target domain or URL
+        #[arg(value_name = "TARGET")]
+        target: String,
+
+        /// Output directory for results
+        #[arg(short, long, default_value = "bugbounty_output")]
+        output: String,
+
+        /// Run in silent mode (less output)
+        #[arg(long)]
+        silent: bool,
+
+        /// Emit JSON output
+        #[arg(long)]
+        json: bool,
+
+        /// Dry run — show what would be executed without running
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Resume from previous run
+        #[arg(long)]
+        resume: bool,
+    },
+    /// Report which recon tools are present and which are missing, with the
+    /// exact install command for each.
+    Doctor {
+        /// Only report on these tools (default: all)
+        #[arg(value_name = "TOOL")]
+        tools: Vec<String>,
+
+        /// Emit JSON instead of markdown
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install the named recon tools. Nothing is installed implicitly by the
+    /// agent; this is always an explicit, user-initiated action.
+    Install {
+        /// Tools to install. Omit to install the whole default pipeline.
+        #[arg(value_name = "TOOL")]
+        tools: Vec<String>,
+
+        /// Show what would run without installing anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit JSON instead of a human-readable log
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the tools that can be installed automatically.
+    List {
+        /// Emit JSON instead of a table
         #[arg(long)]
         json: bool,
     },

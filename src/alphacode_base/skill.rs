@@ -2011,10 +2011,15 @@ mod tests {
                     !parsed.description.is_empty(),
                     "bundled bugbounty description must not be empty"
                 );
+                // The body was retitled from "BUG BOUNTY" to "SECURITY REVIEW"
+                // when the skill was generalised, so the old literal check no
+                // longer matched anything. Assert on the methodology markers
+                // that define the skill instead, which is what the test was
+                // actually trying to protect.
                 assert!(
-                    parsed.content.contains("bug bounty")
-                        || parsed.content.contains("Bug Bounty")
-                        || parsed.content.contains("BUG BOUNTY"),
+                    parsed.content.contains("EVIDENCE OVER IMPACT CHASING")
+                        && parsed.content.contains("G1")
+                        && parsed.content.contains("G7"),
                     "bundled bugbounty body must contain the hunter methodology text"
                 );
                 registry.skills.entry(parsed.name.clone()).or_insert(parsed);
