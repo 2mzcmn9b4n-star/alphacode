@@ -36,7 +36,7 @@ const GITHUB_REPO: &str = "dragonked2/alphacode";
 /// spurious 403s. Half an hour is far below any realistic release cadence and
 /// keeps automatic checks to at most a couple of requests per hour.
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
-const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Time allowed for the initial TCP/TLS connect to the download host.
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Total wall-clock budget for a single download *attempt*.
@@ -160,6 +160,13 @@ fn is_inside_git_repo(path: &std::path::Path) -> bool {
     false
 }
 
+/// Maximum number of retry attempts for update checks.
+const UPDATE_CHECK_MAX_RETRIES: u32 = 3;
+/// Initial backoff delay for retry attempts.
+const UPDATE_CHECK_RETRY_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+/// Maximum backoff delay for retry attempts.
+const UPDATE_CHECK_RETRY_BACKOFF_MAX: Duration = Duration::from_secs(8);
+
 pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
     let url = format!(
         "https://api.github.com/repos/{}/releases/latest",
@@ -171,24 +178,54 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
         .user_agent("alphacode-updater")
         .build()?;
 
-    let response = github_api_request(&client, &url)
-        .send()
-        .context("Failed to fetch release info")?;
+    let mut last_error = None;
+    for attempt in 0..=UPDATE_CHECK_MAX_RETRIES {
+        if attempt > 0 {
+            let backoff = UPDATE_CHECK_RETRY_BACKOFF_INITIAL
+                .mul_f32(2_f32.powi((attempt - 1) as i32))
+                .min(UPDATE_CHECK_RETRY_BACKOFF_MAX);
+            std::thread::sleep(backoff);
+        }
 
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        anyhow::bail!("No releases found");
+        match github_api_request(&client, &url).send() {
+            Ok(response) => {
+                if response.status() == reqwest::StatusCode::NOT_FOUND {
+                    anyhow::bail!("No releases found");
+                }
+
+                if let Some(error) = rate_limit_error(&response) {
+                    return Err(error);
+                }
+
+                if !response.status().is_success() {
+                    let status = response.status();
+                    if status.as_u16() >= 500 && attempt < UPDATE_CHECK_MAX_RETRIES {
+                        last_error = Some(anyhow::anyhow!(
+                            "GitHub API server error: {} (attempt {}/{})",
+                            status,
+                            attempt + 1,
+                            UPDATE_CHECK_MAX_RETRIES + 1
+                        ));
+                        continue;
+                    }
+                    anyhow::bail!("GitHub API error: {}", status);
+                }
+
+                let release: GitHubRelease =
+                    response.json().context("Failed to parse release info")?;
+                return Ok(release);
+            }
+            Err(e) => {
+                if attempt < UPDATE_CHECK_MAX_RETRIES {
+                    last_error = Some(e.into());
+                    continue;
+                }
+                return Err(e.into());
+            }
+        }
     }
 
-    if let Some(error) = rate_limit_error(&response) {
-        return Err(error);
-    }
-
-    if !response.status().is_success() {
-        anyhow::bail!("GitHub API error: {}", response.status());
-    }
-
-    let release: GitHubRelease = response.json().context("Failed to parse release info")?;
-    Ok(release)
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Update check failed after retries")))
 }
 
 fn github_api_request(
