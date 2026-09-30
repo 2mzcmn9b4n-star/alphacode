@@ -37,7 +37,13 @@ Flags:
   --version <v>     Release tag to install (default: latest)
   --prefix <dir>    Install prefix (default: ~/.local)
   --bin-dir <dir>   Override the binary directory (default: <prefix>/bin)
-  --no-path         Do not print PATH instructions at the end
+  --add-path        Append the bin dir to your shell profile so `alphacode`
+                    is on PATH in new shells. Detects bash/zsh/fish/nushell/
+                    csh/ksh and is idempotent across re-runs.
+  --link            Also symlink the binary into a system bin dir
+                    (default /usr/local/bin) so no PATH change is needed at
+                    all. Needs write access — re-run with sudo.
+  --no-path         Do not print or configure PATH instructions at the end
   --from-source     Skip the release download and always build from source
   --source-only     Never fall back to building from source (release-only)
   --source-ref <r>  When building from source, check out this ref (branch/tag/sha)
@@ -48,6 +54,7 @@ Environment:
   ALPHACODE_VERSION=<v>            Default: latest
   ALPHACODE_PREFIX=<dir>           Default: ~/.local
   ALPHACODE_BIN_DIR=<dir>          Default: <prefix>/bin
+  ALPHACODE_LINK_DIR=<dir>         Default: /usr/local/bin (used by --link)
   ALPHACODE_NEVER_RELEASE=1        Alias for --from-source
   ALPHACODE_SOURCE_ONLY=1          Alias for --source-only
   ALPHACODE_SOURCE_REF=<ref>       Alias for --source-ref
@@ -65,6 +72,8 @@ while [ $# -gt 0 ]; do
     --version) VERSION="$2"; shift 2 ;;
     --prefix)  PREFIX="$2";  shift 2 ;;
     --bin-dir) BIN_DIR="$2"; shift 2 ;;
+    --add-path) ADD_PATH=1;   shift ;;
+    --link)     LINK_BIN=1;   shift ;;
     --no-path) NO_PATH=1;    shift ;;
     --source-only) SOURCE_ONLY=1; shift ;;
     --from-source)  NEVER_RELEASE=1; shift ;;
@@ -267,22 +276,129 @@ if [ "${PLATFORM:-}" = "linux" ] && ! "$BIN_DIR/alphacode" --version >/dev/null 
   fi
 fi
 
-if [ -z "${NO_PATH:-}" ] && ! command -v alphacode >/dev/null 2>&1; then
-  echo
-  printf "\033[1;33mNext step:\033[0m add '%s' to your PATH.\n" "$BIN_DIR"
-  case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
+# --- path configuration ------------------------------------------------------
+#
+# Historically this script only *printed* `export PATH=...` and left the user
+# to do it. That is the right default for `curl … | bash` — silently editing a
+# dotfile is intrusive, and the script cannot know which file the user's login
+# shell actually reads — but it means every bare server install ends with a
+# manual step. `--add-path` and `--link` make the automatic path opt-in.
+
+# Makes the profile edit idempotent: re-running the installer must not append a
+# second, duplicate PATH line.
+PATH_MARKER='# added by alphacode install.sh'
+
+# Normalise the login shell to a lowercase basename (e.g. /bin/zsh -> zsh).
+detect_shell() {
+  local shell_path="${SHELL:-}"
+  if [ -z "$shell_path" ] && command -v ps >/dev/null 2>&1; then
+    shell_path="$(ps -p "$PPID" -o comm= 2>/dev/null || true)"
+  fi
+  [ -n "$shell_path" ] || return 1
+  printf '%s\n' "${shell_path##*/}"
+}
+
+# Profile file to edit for a shell, or non-zero when we do not know it.
+profile_for_shell() {
+  case "$1" in
+    bash)      printf '%s\n' "$HOME/.bashrc" ;;
+    zsh)       printf '%s\n' "$HOME/.zshrc" ;;
+    fish)      printf '%s\n' "$HOME/.config/fish/config.fish" ;;
+    nu|nushell) printf '%s\n' "$HOME/.config/nushell/config.nu" ;;
+    csh|tcsh)  printf '%s\n' "$HOME/.tcshrc" ;;
+    ksh)       printf '%s\n' "$HOME/.kshrc" ;;
+    *)         return 1 ;;
+  esac
+}
+
+# The line that prepends the bin dir to PATH in the given shell. Each shell has
+# its own syntax; a POSIX `export` pasted into fish or nushell is a syntax error.
+path_line_for_shell() {
+  case "$1" in
+    fish)
+      printf '%s\n' "fish_add_path \"$2\" 2>/dev/null || set -gx PATH \"$2\" \$PATH"
+      ;;
+    nu|nushell)
+      printf '%s\n' "\$env.PATH = [ \"$2\" ...\$env.PATH ]"
+      ;;
+    csh|tcsh)
+      # csh has no `$path` array append; setenv prepends to PATH.
+      printf '%s\n' "setenv PATH \"$2:\$PATH\""
+      ;;
     *)
-      cat <<PATH
+      printf '%s\n' "export PATH=\"$2:\$PATH\""
+      ;;
+  esac
+}
+
+add_bin_dir_to_path() {
+  local shell profile
+  if ! shell="$(detect_shell)"; then
+    warn "could not detect your shell; add '$BIN_DIR' to PATH manually"
+    return 1
+  fi
+  if ! profile="$(profile_for_shell "$shell")"; then
+    warn "unsupported shell '$shell'; add '$BIN_DIR' to PATH manually"
+    return 1
+  fi
+  if [ -f "$profile" ] && grep -qF "$PATH_MARKER" "$profile"; then
+    print "'$profile' already configured for '$BIN_DIR'"
+    return 0
+  fi
+  mkdir -p "$(dirname "$profile")"
+  {
+    printf '\n%s\n' "$PATH_MARKER"
+    printf '%s\n' "$(path_line_for_shell "$shell" "$BIN_DIR")"
+  } >> "$profile"
+  print "added '$BIN_DIR' to PATH via $profile"
+  print "open a new shell (or run: exec \$SHELL) to pick it up"
+}
+
+# Symlink into a system bin dir so `alphacode` resolves with no PATH edit.
+link_into_system_bin() {
+  local target="${ALPHACODE_LINK_DIR:-/usr/local/bin}"
+  local link="$target/alphacode"
+  if [ ! -d "$target" ]; then
+    warn "$target does not exist; create it or use --add-path instead"
+    return 1
+  fi
+  if [ ! -w "$target" ]; then
+    warn "$target is not writable; re-run with sudo to create the symlink"
+    return 1
+  fi
+  ln -sf "$BIN_DIR/alphacode" "$link"
+  print "linked $link -> $BIN_DIR/alphacode"
+}
+
+if [ -n "${LINK_BIN:-}" ]; then
+  link_into_system_bin || warn "symlink not created; '$BIN_DIR' still works"
+fi
+
+if [ -z "${NO_PATH:-}" ] && ! command -v alphacode >/dev/null 2>&1; then
+  # Try the automatic route first when asked. If it cannot (unknown shell, no
+  # profile), fall through to the manual instructions rather than leaving the
+  # user with a warning and nothing to copy.
+  if ! { [ -n "${ADD_PATH:-}" ] && add_bin_dir_to_path; }; then
+    echo
+    printf "\033[1;33mNext step:\033[0m add '%s' to your PATH.\n" "$BIN_DIR"
+    printf "\033[0;90mOr re-run the installer with --add-path to do it for you.\033[0m\n"
+    case ":$PATH:" in
+      *":$BIN_DIR:"*) ;;
+      *)
+        cat <<PATH
 
   # Bash / Zsh — append to your ~/.bashrc or ~/.zshrc:
   export PATH="$BIN_DIR:\$PATH"
 
   # Fish:
   fish_add_path "$BIN_DIR"
+
+  # Nushell:
+  \$env.PATH = [ "$BIN_DIR" ...\$env.PATH ]
 PATH
-      ;;
-  esac
+        ;;
+    esac
+  fi
 fi
 
 print "Run \`alphacode login\` to connect a model, then \`alphacode\` to start."

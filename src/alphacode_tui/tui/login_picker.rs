@@ -1,6 +1,7 @@
 use crate::alphacode_tui::auth::AuthState;
 use crate::alphacode_tui::provider_catalog::LoginProviderDescriptor;
 use crate::alphacode_tui::tui::query_highlight;
+use crate::alphacode_tui_style::palette::{Role, role_color};
 use crate::alphacode_tui_style::rgb;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -8,13 +9,41 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-const PANEL_BG: Color = Color::Rgb(22, 26, 38);
-const PANEL_BORDER: Color = Color::Rgb(75, 82, 100);
-const PANEL_BORDER_ACTIVE: Color = Color::Rgb(110, 175, 155);
-const SECTION_BORDER: Color = Color::Rgb(60, 68, 88);
-const SELECTED_BG: Color = Color::Rgb(32, 42, 52);
-const MUTED: Color = Color::Rgb(130, 140, 160);
-const MUTED_DARK: Color = Color::Rgb(90, 98, 118);
+// Chrome colors come from palette roles rather than fixed literals, so this
+// screen follows the selected theme instead of rendering as a hardcoded dark
+// panel under all 30+ presets. These were `const`s; they have to be functions
+// because the active palette is runtime state (it swaps on `/theme`) and
+// `role_color` cannot be evaluated in a const context.
+//
+// Three of the previous literals were byte-identical to the role defaults
+// (`PanelBorderMuted` 75,82,100 / `PanelBorder` 110,175,155 / `MutedText`
+// 130,140,160), so the default palette renders pixel-for-pixel as before. The
+// rest land within 14 per channel of their old value.
+//
+// Note: `provider_style` below deliberately keeps literal colors -- those are
+// provider brand identities (Claude amber, OpenAI green), not chrome, and
+// recoloring them to match a theme would be wrong.
+fn panel_bg() -> Color {
+    role_color(Role::UserBg)
+}
+fn panel_border() -> Color {
+    role_color(Role::PanelBorderMuted)
+}
+fn panel_border_active() -> Color {
+    role_color(Role::PanelBorder)
+}
+fn section_border() -> Color {
+    role_color(Role::Border)
+}
+fn selected_bg() -> Color {
+    role_color(Role::SelectionBg)
+}
+fn muted_text() -> Color {
+    role_color(Role::MutedText)
+}
+fn muted_dark() -> Color {
+    role_color(Role::Dim)
+}
 const OVERLAY_PERCENT_X: u16 = 88;
 const OVERLAY_PERCENT_Y: u16 = 74;
 
@@ -338,18 +367,18 @@ impl LoginPicker {
             ))
             .title_bottom(Line::from(vec![
                 hotkey(" Enter "),
-                Span::styled(" login  ", Style::default().fg(MUTED_DARK)),
+                Span::styled(" login  ", Style::default().fg(muted_dark())),
                 hotkey(" Up/Down "),
-                Span::styled(" navigate  ", Style::default().fg(MUTED_DARK)),
+                Span::styled(" navigate  ", Style::default().fg(muted_dark())),
                 hotkey(" Click "),
-                Span::styled(" select  ", Style::default().fg(MUTED_DARK)),
+                Span::styled(" select  ", Style::default().fg(muted_dark())),
                 hotkey(" type "),
-                Span::styled(" filter  ", Style::default().fg(MUTED_DARK)),
+                Span::styled(" filter  ", Style::default().fg(muted_dark())),
                 hotkey(" Esc "),
-                Span::styled(" clear / close ", Style::default().fg(MUTED_DARK)),
+                Span::styled(" clear / close ", Style::default().fg(muted_dark())),
             ]))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(PANEL_BORDER));
+            .border_style(Style::default().fg(panel_border()));
         frame.render_widget(block, area);
 
         let inner = Rect {
@@ -378,10 +407,10 @@ impl LoginPicker {
         self.render_detail_pane(frame, body[1]);
 
         let footer = Paragraph::new(Line::from(vec![
-            Span::styled("Tip ", Style::default().fg(MUTED_DARK)),
+            Span::styled("Tip ", Style::default().fg(muted_dark())),
             Span::styled(
                 "Move or click through providers on the left; the focused provider expands on the right with setup and account details.",
-                Style::default().fg(MUTED),
+                Style::default().fg(muted_text()),
             ),
         ]));
         frame.render_widget(footer, rows[2]);
@@ -394,14 +423,14 @@ impl LoginPicker {
                 Style::default().fg(rgb(180, 220, 200)).bold(),
             ))
             .borders(Borders::ALL)
-            .style(Style::default().bg(PANEL_BG))
-            .border_style(Style::default().fg(SECTION_BORDER));
+            .style(Style::default().bg(panel_bg()))
+            .border_style(Style::default().fg(section_border()));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
         // The caret marks the live filter box, so it is obvious that typing
         // goes somewhere even when the filter is unchanged between frames.
-        let mut filter_spans = vec![Span::styled("Filter ", Style::default().fg(MUTED_DARK))];
+        let mut filter_spans = vec![Span::styled("Filter ", Style::default().fg(muted_dark()))];
         if self.filter.is_empty() {
             filter_spans.push(Span::styled(
                 "type provider, status, or auth method",
@@ -420,7 +449,7 @@ impl LoginPicker {
                 self.filtered.len(),
                 self.items.len()
             ),
-            Style::default().fg(MUTED_DARK),
+            Style::default().fg(muted_dark()),
         ));
 
         let lines = vec![
@@ -467,8 +496,8 @@ impl LoginPicker {
                 Style::default().fg(rgb(180, 220, 200)).bold(),
             ))
             .borders(Borders::ALL)
-            .style(Style::default().bg(PANEL_BG))
-            .border_style(Style::default().fg(PANEL_BORDER_ACTIVE));
+            .style(Style::default().bg(panel_bg()))
+            .border_style(Style::default().fg(panel_border_active()));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         self.last_provider_list_area = Some(inner);
@@ -485,7 +514,7 @@ impl LoginPicker {
             )));
             lines.push(Line::from(Span::styled(
                 "Try `openai`, `oauth`, `configured`, or `setup`.",
-                Style::default().fg(MUTED),
+                Style::default().fg(muted_text()),
             )));
         } else {
             for visible_idx in start..end {
@@ -493,7 +522,7 @@ impl LoginPicker {
                 let item = &self.items[idx];
                 let selected = visible_idx == self.selected;
                 let row_style = if selected {
-                    Style::default().bg(SELECTED_BG)
+                    Style::default().bg(selected_bg())
                 } else {
                     Style::default()
                 };
@@ -523,7 +552,7 @@ impl LoginPicker {
                             .fg(rgb(130, 224, 215))
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        row_style.fg(MUTED_DARK)
+                        row_style.fg(muted_dark())
                     },
                 )];
                 row_spans.extend(query_highlight::highlight_within(
@@ -534,7 +563,10 @@ impl LoginPicker {
                     hit_style,
                 ));
                 if hint_fits && let Some(hint) = hint {
-                    row_spans.push(Span::styled(format!("  · {hint}"), row_style.fg(MUTED)));
+                    row_spans.push(Span::styled(
+                        format!("  · {hint}"),
+                        row_style.fg(muted_text()),
+                    ));
                 }
 
                 let used: usize = row_spans.iter().map(|span| span.width()).sum();
@@ -563,8 +595,8 @@ impl LoginPicker {
                 Style::default().fg(rgb(180, 220, 200)).bold(),
             ))
             .borders(Borders::ALL)
-            .style(Style::default().bg(PANEL_BG))
-            .border_style(Style::default().fg(SECTION_BORDER));
+            .style(Style::default().bg(panel_bg()))
+            .border_style(Style::default().fg(section_border()));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -594,7 +626,7 @@ impl LoginPicker {
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Provider ", Style::default().fg(MUTED_DARK)),
+                Span::styled("Provider ", Style::default().fg(muted_dark())),
                 Span::styled(
                     item.provider.display_name.to_string(),
                     provider_style(item.provider.id),
@@ -609,7 +641,7 @@ impl LoginPicker {
                 },
             ]),
             Line::from(vec![
-                Span::styled("Login command ", Style::default().fg(MUTED_DARK)),
+                Span::styled("Login command ", Style::default().fg(muted_dark())),
                 Span::styled(
                     format!("/login {}", item.provider.id),
                     Style::default().fg(Color::White),
@@ -617,7 +649,7 @@ impl LoginPicker {
             ]),
             Line::from(vec![Span::styled(
                 "Authentication",
-                Style::default().fg(MUTED_DARK).bold(),
+                Style::default().fg(muted_dark()).bold(),
             )]),
             Line::from(vec![Span::styled(
                 item.provider.auth_kind.label(),
@@ -628,16 +660,16 @@ impl LoginPicker {
             Line::from(""),
             Line::from(vec![Span::styled(
                 "Detected setup",
-                Style::default().fg(MUTED_DARK).bold(),
+                Style::default().fg(muted_dark()).bold(),
             )]),
             Line::from(vec![Span::styled(
                 item.method_detail.clone(),
-                Style::default().fg(MUTED),
+                Style::default().fg(muted_text()),
             )]),
             Line::from(""),
             Line::from(vec![Span::styled(
                 "What you need",
-                Style::default().fg(MUTED_DARK).bold(),
+                Style::default().fg(muted_dark()).bold(),
             )]),
             Line::from(vec![Span::styled(
                 item.provider.menu_detail.to_string(),
@@ -645,18 +677,18 @@ impl LoginPicker {
             )]),
             Line::from(""),
             Line::from(vec![
-                Span::styled("Aliases ", Style::default().fg(MUTED_DARK)),
-                Span::styled(aliases, Style::default().fg(MUTED)),
+                Span::styled("Aliases ", Style::default().fg(muted_dark())),
+                Span::styled(aliases, Style::default().fg(muted_text())),
             ]),
             Line::from(vec![
-                Span::styled("Numbered accounts ", Style::default().fg(MUTED_DARK)),
+                Span::styled("Numbered accounts ", Style::default().fg(muted_dark())),
                 Span::styled(
                     if provider_supports_named_accounts(item.provider) {
                         "supported"
                     } else {
                         "not used for this provider"
                     },
-                    Style::default().fg(MUTED),
+                    Style::default().fg(muted_text()),
                 ),
             ]),
         ];
@@ -667,7 +699,7 @@ impl LoginPicker {
         if !self.filter.trim().is_empty() {
             let hint = item.match_source_hint(self.filter.trim());
             lines.push(Line::from(vec![
-                Span::styled("Filter match ", Style::default().fg(MUTED_DARK)),
+                Span::styled("Filter match ", Style::default().fg(muted_dark())),
                 Span::styled(
                     hint.unwrap_or_else(|| "provider name".to_string()),
                     Style::default().fg(rgb(235, 245, 255)),
@@ -773,11 +805,11 @@ fn account_detail_lines(provider: LoginProviderDescriptor) -> Vec<Line<'static>>
         _ => vec![
             Line::from(vec![Span::styled(
                 "Accounts",
-                Style::default().fg(MUTED_DARK).bold(),
+                Style::default().fg(muted_dark()).bold(),
             )]),
             Line::from(vec![Span::styled(
                 "This provider is usually configured as a single credential or env-based login.",
-                Style::default().fg(MUTED),
+                Style::default().fg(muted_text()),
             )]),
         ],
     }
@@ -790,16 +822,16 @@ fn claude_account_lines() -> Vec<Line<'static>> {
 
     let mut lines = vec![Line::from(vec![Span::styled(
         "Accounts",
-        Style::default().fg(MUTED_DARK).bold(),
+        Style::default().fg(muted_dark()).bold(),
     )])];
 
     if accounts.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "No saved Claude accounts yet.",
-            Style::default().fg(MUTED),
+            Style::default().fg(muted_text()),
         )]));
         lines.push(Line::from(vec![
-            Span::styled("Add more later with ", Style::default().fg(MUTED_DARK)),
+            Span::styled("Add more later with ", Style::default().fg(muted_dark())),
             Span::styled("/account claude add", Style::default().fg(Color::White)),
         ]));
         return lines;
@@ -809,7 +841,7 @@ fn claude_account_lines() -> Vec<Line<'static>> {
         active_label.unwrap_or_else(crate::alphacode_base::auth::claude::primary_account_label);
     lines.push(Line::from(vec![Span::styled(
         format!("{} saved · active: {}", accounts.len(), active),
-        Style::default().fg(MUTED),
+        Style::default().fg(muted_text()),
     )]));
 
     for account in accounts.iter().take(6) {
@@ -834,13 +866,13 @@ fn claude_account_lines() -> Vec<Line<'static>> {
                 Style::default().fg(if is_active {
                     Color::Rgb(111, 214, 181)
                 } else {
-                    MUTED
+                    muted_text()
                 }),
             ),
             Span::styled(account.label.clone(), Style::default().fg(Color::White)),
             Span::styled(
                 format!(" · {} · {} · {}", email, account_status, plan),
-                Style::default().fg(MUTED),
+                Style::default().fg(muted_text()),
             ),
         ]));
     }
@@ -848,12 +880,12 @@ fn claude_account_lines() -> Vec<Line<'static>> {
     if accounts.len() > 6 {
         lines.push(Line::from(vec![Span::styled(
             format!("+{} more accounts", accounts.len() - 6),
-            Style::default().fg(MUTED_DARK),
+            Style::default().fg(muted_dark()),
         )]));
     }
 
     lines.push(Line::from(vec![
-        Span::styled("Manage with ", Style::default().fg(MUTED_DARK)),
+        Span::styled("Manage with ", Style::default().fg(muted_dark())),
         Span::styled("/account claude", Style::default().fg(Color::White)),
     ]));
     lines
@@ -866,16 +898,16 @@ fn openai_account_lines() -> Vec<Line<'static>> {
 
     let mut lines = vec![Line::from(vec![Span::styled(
         "Accounts",
-        Style::default().fg(MUTED_DARK).bold(),
+        Style::default().fg(muted_dark()).bold(),
     )])];
 
     if accounts.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "No saved OpenAI accounts yet.",
-            Style::default().fg(MUTED),
+            Style::default().fg(muted_text()),
         )]));
         lines.push(Line::from(vec![
-            Span::styled("Add more later with ", Style::default().fg(MUTED_DARK)),
+            Span::styled("Add more later with ", Style::default().fg(muted_dark())),
             Span::styled("/account openai add", Style::default().fg(Color::White)),
         ]));
         return lines;
@@ -885,7 +917,7 @@ fn openai_account_lines() -> Vec<Line<'static>> {
         active_label.unwrap_or_else(crate::alphacode_base::auth::codex::primary_account_label);
     lines.push(Line::from(vec![Span::styled(
         format!("{} saved · active: {}", accounts.len(), active),
-        Style::default().fg(MUTED),
+        Style::default().fg(muted_text()),
     )]));
 
     for account in accounts.iter().take(6) {
@@ -910,13 +942,13 @@ fn openai_account_lines() -> Vec<Line<'static>> {
                 Style::default().fg(if is_active {
                     Color::Rgb(111, 214, 181)
                 } else {
-                    MUTED
+                    muted_text()
                 }),
             ),
             Span::styled(account.label.clone(), Style::default().fg(Color::White)),
             Span::styled(
                 format!(" · {} · {} · {}", email, account_status, account_id),
-                Style::default().fg(MUTED),
+                Style::default().fg(muted_text()),
             ),
         ]));
     }
@@ -924,12 +956,12 @@ fn openai_account_lines() -> Vec<Line<'static>> {
     if accounts.len() > 6 {
         lines.push(Line::from(vec![Span::styled(
             format!("+{} more accounts", accounts.len() - 6),
-            Style::default().fg(MUTED_DARK),
+            Style::default().fg(muted_dark()),
         )]));
     }
 
     lines.push(Line::from(vec![
-        Span::styled("Manage with ", Style::default().fg(MUTED_DARK)),
+        Span::styled("Manage with ", Style::default().fg(muted_dark())),
         Span::styled("/account openai", Style::default().fg(Color::White)),
     ]));
     lines
@@ -1039,7 +1071,32 @@ mod tests {
         );
         let probe = &terminal.backend().buffer()[(overlay.x + overlay.width - 3, overlay.y + 2)];
         assert_eq!(probe.symbol(), "X");
-        assert_ne!(probe.bg, Color::Rgb(18, 21, 30));
+        // The overlay must not paint a full-screen backdrop: whatever the
+        // underlying content had must still be showing through. Compare against
+        // the live panel background rather than a baked-in RGB, so this keeps
+        // testing the real invariant when the palette or theme changes.
+        assert_ne!(probe.bg, panel_bg());
+    }
+
+    /// Regression: the login picker's chrome must follow the active palette.
+    ///
+    /// The seven chrome colors used to be module-level `const`s holding fixed
+    /// RGB values, so this screen ignored the selected theme entirely and
+    /// rendered as a hardcoded dark panel under every one of the 30+ presets
+    /// (most visibly broken in light themes). They are now `role_color` lookups.
+    ///
+    /// This asserts the mapping reaches the roles it claims rather than
+    /// snapshotting today's colors, so a future palette change cannot silently
+    /// re-break it.
+    #[test]
+    fn test_login_picker_chrome_resolves_through_palette_roles() {
+        assert_eq!(panel_border(), role_color(Role::PanelBorderMuted));
+        assert_eq!(panel_border_active(), role_color(Role::PanelBorder));
+        assert_eq!(muted_text(), role_color(Role::MutedText));
+        assert_eq!(panel_bg(), role_color(Role::UserBg));
+        assert_eq!(section_border(), role_color(Role::Border));
+        assert_eq!(selected_bg(), role_color(Role::SelectionBg));
+        assert_eq!(muted_dark(), role_color(Role::Dim));
     }
 
     #[test]

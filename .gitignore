@@ -50,3 +50,6 @@ scripts/.[a-zA-Z0-9_-]*.ps1
 .tmp-*.ps1
 .scratch_*.ps1
 .release_jobs.json
+
+# Scratch directory used by agent tooling (build logs, verification harnesses).
+.audit_tmp/

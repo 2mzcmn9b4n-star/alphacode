@@ -1062,6 +1062,16 @@ impl App {
         let compact_started = match compaction.try_write() {
             Ok(mut manager) => {
                 let mut provider_messages = self.materialized_provider_messages();
+                // Record what the context *actually* weighs before faking the
+                // counter. We raise the observed count to the limit purely so
+                // the compactor agrees it is out of room, but
+                // `effective_token_count_with` returns `max(estimate,
+                // observed)`, so leaving the faked value in place made the
+                // emitted event report `pre_tokens` as the entire context
+                // window. A 18k conversation was announced as
+                // "256,000->18,319 tokens", which reads as though the system
+                // prompt had exploded. It had not.
+                let real_pre_tokens = manager.effective_token_count_with(&provider_messages) as u64;
                 manager.update_observed_input_tokens(self.context_limit);
                 let usage = manager.context_usage_with(&provider_messages);
                 if usage > 1.5 {
@@ -1080,6 +1090,13 @@ impl App {
                     }
                     false
                 } else {
+                    // Put the honest count back before compacting, so the
+                    // `pre_tokens` on the event we are about to emit is the real
+                    // pre-compaction size. The faked value is not needed from
+                    // here on: `hard_compact_with` sizes its drop from a
+                    // char-based estimate against `token_budget`, not from the
+                    // observed count.
+                    manager.update_observed_input_tokens(real_pre_tokens);
                     match manager.force_compact_with(&provider_messages, self.provider.clone()) {
                         Ok(()) => true,
                         Err(_) => match manager.hard_compact_with(&provider_messages) {

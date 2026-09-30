@@ -6,6 +6,85 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.67] - 2026-09-30
+
+> **Upgrade note for 1.0.66 users on Windows:** the in-app updater shipped in
+> 1.0.66 cannot install any update, including this one, because of the zip
+> extraction bug fixed below. Download 1.0.67 manually once; self-update works
+> again from then on.
+
+### Fixed
+
+- **The Windows in-app updater failed on every release, for every user.** The
+  zip extraction path proved containment by comparing
+  `extract_dir.canonicalize()` against `extract_dir.join(file_name).parent()`.
+  On Windows `canonicalize` returns a verbatim `\\?\`-prefixed path while the
+  other side was built from the non-canonical `extract_dir`, so the two could
+  never compare equal. The guard rejected *every* entry and aborted with
+  `zip entry "alphacode.exe" resolved outside the extraction directory` before
+  writing a single byte. Windows release assets are `.zip`, so this was 100% of
+  Windows self-updates rather than an edge case. The root is now canonicalized
+  once and entry names are joined onto that canonical path, which makes
+  containment structural and also removes a `canonicalize` syscall per archive
+  entry. The extraction logic moved into `extract_zip_asset_into` so it is
+  directly testable, with regression coverage for top-level extraction,
+  multi-file archives, and the zip-slip rejections (traversal, absolute, and
+  nested entries) that the guard exists to prevent.
+- **Restored 10 missing module declarations in `alphacode_tui::tui`.**
+  `enhanced_status`, `improved_input`, `model_browser`,
+  `model_browser_open`, `model_browser_render`, `model_performance`,
+  `picker_spacing`, `smart_model_picker`, `ui_console`, `ui_empty_state` and
+  `ui_professional` all exist on disk but were not declared, producing five
+  unresolved-import errors and a hard build failure.
+- Removed three duplicate `#[test]` definitions in `ui_header.rs` that made the
+  test module fail to compile.
+- **An output-length cap was misread as a context overflow, silently deleting a
+  message.** `is_context_limit_error` accepted `maximum tokens`,
+  `token limit`, and `exceeded && tokens` — all of which an *output* cap also
+  matches. When a provider rejected a response for exceeding its output limit,
+  the app compacted the conversation and retried the identical request, which
+  failed the same way, while dropping a message and reporting
+  `Context compacted (emergency) — older messages dropped`. Compaction shrinks
+  the input and cannot raise an output cap, so the retry was never going to
+  succeed. Output-cap and payload-size errors are now classified separately, and
+  neither triggers token compaction.
+- **Emergency compaction no longer reports a fabricated token count.** The
+  auto-compact path raises the observed input-token count to the full context
+  limit so the compactor agrees it is out of room. Because
+  `effective_token_count_with` returns `max(estimate, observed)`, that faked
+  value leaked into the emitted event, so a 18k conversation was announced as
+  `256,000->18,319 tokens` — reading as though the system prompt had exploded
+  when it had not. The real pre-compaction size is now captured before the
+  counter is raised and restored before compacting. The forced value is still
+  used to select the compaction strategy, which is all it was needed for;
+  `hard_compact_with` sizes its drop from a char-based estimate against
+  `token_budget`, not from the observed count.
+
+### Changed
+
+- **The login picker now follows the selected theme.** Its seven chrome colors
+  were module-level `const`s holding fixed RGB values, so the screen ignored
+  the active palette and rendered as a hardcoded dark panel under all 30+
+  presets — most visibly broken in light themes. They now resolve through
+  `role_color`, using the `PanelBorder`, `PanelBorderMuted`, `MutedText`,
+  `Border`, `SelectionBg`, `Dim` and `UserBg` roles. Three of the previous
+  literals were byte-identical to those role defaults, so the default palette
+  renders unchanged while every other theme becomes correct. The per-provider
+  brand colors in `provider_style` intentionally stay literal: they are brand
+  identities, not chrome.
+- **`install.sh` can configure `PATH` automatically.** `--add-path` appends the
+  bin directory to the profile for the detected shell (bash, zsh, fish,
+  nushell, csh/tcsh, ksh) and is idempotent across re-runs via a marker
+  comment. `--link` additionally symlinks the binary into a system bin
+  directory (default `/usr/local/bin`) so no `PATH` change is needed at all.
+  Both are opt-in; the previous print-only behaviour remains the default
+  because `curl | bash` should not silently rewrite dotfiles. The printed
+  instructions now include nushell syntax, which was previously missing.
+- Deleted `ui_polish.rs` (480 lines). It was never declared as a module, so it
+  had never been compiled, and nothing referenced it. Its palette, easing,
+  transition and effects were all already superseded by `alphacode_tui_style`
+  with theme-aware and perceptually-correct implementations.
+
 ## [1.0.66] - 2026-09-30
 
 ### Performance

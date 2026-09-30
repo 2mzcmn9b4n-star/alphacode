@@ -1018,6 +1018,86 @@ fn log_download_retry_short(attempt: usize, downloaded: u64, total: u64) {
     ));
 }
 
+/// Extract a `.zip` release asset into `extract_dir`, keeping only
+/// top-level files.
+///
+/// Windows release assets are published as `.zip` (see `release.yml` and
+/// `scripts/install.ps1`); every other platform uses `.tar.gz`.
+///
+/// # Entry filtering
+///
+/// `entry.name()` is the raw stored name with no normalisation, and the `zip`
+/// crate documents that it points at [`enclosed_name`] for exactly this
+/// reason. A separator-only filter rejects `../../evil` and `/etc/shadow`, but
+/// an entry named `C:evil.exe` contains no separator at all and slips through
+/// — and on Windows `Path::join` *replaces* the accumulated path when the
+/// operand carries a drive prefix, so that write would land in the process CWD
+/// on drive C:.
+///
+/// `enclosed_name()` rejects prefix/root components, refuses any `..` that
+/// escapes, and rejects NUL bytes. Requiring exactly one `Component::Normal`
+/// on top of that preserves the original "top-level files only, no
+/// subdirectories" intent.
+///
+/// # Why the root is canonicalized once, up front
+///
+/// This used to canonicalize `extract_dir` inside the loop and compare it
+/// against `extract_dir.join(file_name).parent()`. That comparison can never
+/// succeed on Windows: [`Path::canonicalize`] returns a verbatim `\\?\`-prefixed
+/// path, while the left-hand side was built from the non-canonical
+/// `extract_dir`. The two spell the same directory differently, so the
+/// containment `ensure!` failed for *every* entry and the Windows in-app updater
+/// aborted with `zip entry ... resolved outside the extraction directory`
+/// before writing a single byte. Since Windows ships `.zip` assets, that broke
+/// 100% of Windows self-updates rather than an edge case.
+///
+/// Joining onto the already-canonical root makes containment structural:
+/// `file_name` is a single `Component::Normal`, so
+/// `base.join(file_name).parent() == base` holds by construction. The `ensure!`
+/// stays as a tripwire against future regressions, and hoisting the
+/// `canonicalize` out of the loop also drops a syscall per archive entry.
+fn extract_zip_asset_into(bytes: &[u8], extract_dir: &Path) -> Result<()> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor).context("Failed to open zip archive")?;
+    let base = extract_dir
+        .canonicalize()
+        .context("Failed to canonicalize extract dir")?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        if entry.is_dir() {
+            continue;
+        }
+        let Some(rel) = entry.enclosed_name() else {
+            continue;
+        };
+        let mut components = rel.components();
+        let Some(std::path::Component::Normal(file_name)) = components.next() else {
+            continue;
+        };
+        if components.next().is_some() {
+            continue;
+        }
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if file_name.is_empty() || file_name.ends_with(".zip") {
+            continue;
+        }
+        let dest = base.join(file_name);
+        // Belt and braces: prove containment after the join and before
+        // creating anything on disk. `base` is already canonical, so this
+        // compares canonical-to-canonical and is not defeated by the `\\?\`
+        // verbatim prefix that `canonicalize` adds on Windows.
+        anyhow::ensure!(
+            dest.parent() == Some(base.as_path()),
+            "zip entry {file_name:?} resolved outside the extraction directory"
+        );
+        let mut out_file = fs::File::create(&dest)?;
+        std::io::copy(&mut entry, &mut out_file)?;
+    }
+    Ok(())
+}
+
 pub fn download_and_install_blocking_with_progress(
     release: &GitHubRelease,
     mut on_progress: impl FnMut(DownloadProgress),
@@ -1086,56 +1166,7 @@ pub fn download_and_install_blocking_with_progress(
                 entry.unpack(&dest)?;
             }
         } else {
-            let cursor = std::io::Cursor::new(&bytes);
-            let mut archive = zip::ZipArchive::new(cursor).context("Failed to open zip archive")?;
-            for i in 0..archive.len() {
-                let mut entry = archive.by_index(i)?;
-                if entry.is_dir() {
-                    continue;
-                }
-                // `entry.name()` is the raw stored name with no normalisation;
-                // the `zip` crate documents this and points at
-                // `enclosed_name()` for exactly this reason. The previous
-                // separator filter did reject `../../evil` and `/etc/shadow`,
-                // but an entry named `C:evil.exe` contains no separator at all
-                // and slipped through — and on Windows `extract_dir.join()`
-                // *replaces* the accumulated path when the operand carries a
-                // drive prefix, so that write landed in the process CWD on
-                // drive C:.
-                //
-                // `enclosed_name()` rejects prefix/root components, refuses any
-                // `..` that escapes, and rejects NUL bytes. Requiring exactly
-                // one `Normal` component on top of that preserves the original
-                // "top-level files only, no subdirectories" intent.
-                let Some(rel) = entry.enclosed_name() else {
-                    continue;
-                };
-                let mut components = rel.components();
-                let Some(std::path::Component::Normal(file_name)) = components.next() else {
-                    continue;
-                };
-                if components.next().is_some() {
-                    continue;
-                }
-                let Some(file_name) = file_name.to_str() else {
-                    continue;
-                };
-                if file_name.is_empty() || file_name.ends_with(".zip") {
-                    continue;
-                }
-                let dest = extract_dir.join(file_name);
-                // Belt and braces: prove containment after the join and before
-                // creating anything on disk.
-                let base = extract_dir
-                    .canonicalize()
-                    .context("Failed to canonicalize extract dir")?;
-                anyhow::ensure!(
-                    dest.parent() == Some(base.as_path()),
-                    "zip entry {file_name:?} resolved outside the extraction directory"
-                );
-                let mut out_file = fs::File::create(&dest)?;
-                std::io::copy(&mut entry, &mut out_file)?;
-            }
+            extract_zip_asset_into(&bytes, &extract_dir)?;
         }
 
         let mut extracted_binary: Option<PathBuf> = None;
@@ -1344,6 +1375,104 @@ mod tests {
     use super::*;
     use crate::alphacode_update_core::parse_sha256sums;
     use sha2::{Digest, Sha256};
+
+    /// Build an in-memory zip from `(name, contents)` pairs. `zip` only has a
+    /// writer behind the `deflate` feature's `ZipWriter`, which this crate
+    /// enables, so writing real archives in tests is possible.
+    fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buffer);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, contents) in entries {
+                writer.start_file(*name, options).expect("start_file");
+                std::io::Write::write_all(&mut writer, contents).expect("write entry");
+            }
+            writer.finish().expect("finish zip");
+        }
+        buffer.into_inner()
+    }
+
+    /// Regression: a normal Windows release zip must extract successfully.
+    ///
+    /// The containment guard used to compare `extract_dir.canonicalize()`
+    /// against `extract_dir.join(file_name).parent()`. On Windows
+    /// `canonicalize` returns a verbatim `\\?\`-prefixed path while the other
+    /// side was built from the non-canonical `extract_dir`, so the two never
+    /// compared equal: the guard rejected *every* entry and the in-app updater
+    /// failed with "zip entry \"alphacode.exe\" resolved outside the extraction
+    /// directory" for all Windows users. This test fails against that code on
+    /// Windows and passes with the canonical-root join.
+    #[test]
+    fn test_extract_zip_asset_extracts_top_level_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bytes = build_zip(&[("alphacode.exe", b"MZ fake binary")]);
+
+        extract_zip_asset_into(&bytes, dir.path())
+            .expect("a well-formed Windows release zip must extract");
+
+        let extracted = dir.path().join("alphacode.exe");
+        assert!(extracted.is_file(), "alphacode.exe was not written");
+        assert_eq!(fs::read(&extracted).expect("read"), b"MZ fake binary");
+    }
+
+    /// Multiple top-level files must all land in the extraction root.
+    #[test]
+    fn test_extract_zip_asset_extracts_every_top_level_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bytes = build_zip(&[
+            ("alphacode.exe", b"exe"),
+            ("README.md", b"docs"),
+            ("LICENSE", b"licence"),
+        ]);
+
+        extract_zip_asset_into(&bytes, dir.path()).expect("extract");
+
+        assert_eq!(
+            fs::read(dir.path().join("alphacode.exe")).expect("a"),
+            b"exe"
+        );
+        assert_eq!(fs::read(dir.path().join("README.md")).expect("b"), b"docs");
+        assert_eq!(fs::read(dir.path().join("LICENSE")).expect("c"), b"licence");
+    }
+
+    /// The zip-slip protections must survive the fix: traversal, absolute, and
+    /// nested entries are skipped, and nothing is written outside the root.
+    #[test]
+    fn test_extract_zip_asset_skips_escaping_and_nested_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sentinel = dir.path().join("sentinel.txt");
+        fs::write(&sentinel, b"untouched").expect("write sentinel");
+
+        let bytes = build_zip(&[
+            ("../escaped.txt", b"nope"),
+            ("nested/inner.txt", b"nope"),
+            ("/absolute.txt", b"nope"),
+            ("sentinel.txt", b"clobbered"),
+        ]);
+
+        // Must not panic or error out; hostile entries are skipped, not fatal.
+        extract_zip_asset_into(&bytes, dir.path()).expect("hostile entries are skipped");
+
+        assert_eq!(
+            fs::read(&sentinel).expect("sentinel"),
+            b"untouched",
+            "a zip entry must never overwrite an existing file in the root"
+        );
+        assert!(
+            !dir.path()
+                .parent()
+                .expect("parent")
+                .join("escaped.txt")
+                .exists(),
+            "a `..` entry escaped the extraction root"
+        );
+        assert!(
+            !dir.path().join("nested").exists(),
+            "a nested entry created a subdirectory"
+        );
+    }
 
     #[test]
     fn test_version_is_newer() {

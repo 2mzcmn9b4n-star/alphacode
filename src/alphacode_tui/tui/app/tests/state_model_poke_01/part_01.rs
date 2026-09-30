@@ -11,6 +11,46 @@ fn test_context_limit_error_detection() {
     ));
 }
 
+/// Regression: an output-length cap must not be mistaken for an input/context
+/// overflow.
+///
+/// The old matcher accepted `"maximum tokens"`, `"token limit"`, and
+/// `exceeded && tokens`, all of which an output cap also matches. The app then
+/// compacted the conversation and retried the identical request, which failed
+/// the same way — while silently dropping a message and announcing
+/// "Context compacted (emergency) — older messages dropped" for a problem that
+/// has nothing to do with context size. Compaction cannot raise an output cap.
+#[test]
+fn test_output_token_limit_is_not_a_context_limit() {
+    for err in [
+        "OpenAI API error 400: max_tokens is greater than the maximum number of tokens allowed for this model",
+        "This model's maximum tokens for completion is 16384",
+        "output token limit exceeded",
+        "response too long: finish_reason=length",
+        "max_completion_tokens must be <= 128000",
+    ] {
+        assert!(
+            !is_context_limit_error(err),
+            "output cap must not trigger compaction: {err}"
+        );
+    }
+}
+
+/// The inverse must still hold: a genuine input overflow that happens to
+/// mention a token count is still a context limit. The split must not
+/// over-correct and start ignoring real overflows.
+#[test]
+fn test_real_context_overflow_still_detected() {
+    for err in [
+        "This model's maximum context length is 200000 tokens",
+        "prompt is too long: 250000 tokens > 200000 maximum",
+        "input is too long for the context window",
+        "too many tokens in request",
+    ] {
+        assert!(is_context_limit_error(err), "real overflow missed: {err}");
+    }
+}
+
 #[test]
 fn test_request_payload_too_large_error_detection() {
     assert!(is_request_payload_too_large_error(
