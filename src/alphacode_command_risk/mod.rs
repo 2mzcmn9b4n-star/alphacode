@@ -297,7 +297,104 @@ const CONDITIONALLY_DESTRUCTIVE: &[(&str, &[&str])] = &[
     ("git", &["clean"]),
     ("chmod", &["-R"]),
     ("chown", &["-R"]),
+    // `sed -i` rewrites its input in place. `sed` is therefore excluded from
+    // [`READ_ONLY_COMMANDS`], which is only coherent if the `-i` form is
+    // actually graded — without this it classified as Safe.
+    ("sed", &["-i"]),
 ];
+
+/// Programs that only read: inspecting them cannot damage anything, so their
+/// path arguments are not write targets and must not be graded as such.
+///
+/// Kept deliberately tight. Anything that can write is excluded, even in a
+/// mode that is usually read-only:
+/// * `sed` and `awk` — `sed -i` rewrites in place;
+/// * `install`, `tee`, `dd` — write by design (`dd` is already destructive);
+/// * every program in [`DESTRUCTIVE_COMMANDS`] and
+///   [`CONDITIONALLY_DESTRUCTIVE`], which are graded by their own rules;
+/// * interpreters (`python`, `perl`, `node`) — arbitrary side effects.
+///
+/// An unknown program is treated as *not* read-only, so this can only ever
+/// preserve today's behaviour for anything not deliberately listed.
+const READ_ONLY_COMMANDS: &[&str] = &[
+    // Listing / navigating.
+    "ls",
+    "dir",
+    "pwd",
+    "tree",
+    "find",
+    "locate",
+    // Reading file contents.
+    "cat",
+    "bat",
+    "type",
+    "head",
+    "tail",
+    "tac",
+    "less",
+    "more",
+    "nl",
+    "od",
+    "xxd",
+    "hexdump",
+    "strings",
+    "column",
+    // Searching.
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "ag",
+    "ack",
+    // Text transforms that cannot write without a redirect (graded separately).
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "rev",
+    "wc",
+    // Metadata.
+    "file",
+    "stat",
+    "du",
+    "df",
+    "basename",
+    "dirname",
+    "realpath",
+    "readlink",
+    "md5sum",
+    "sha1sum",
+    "sha256sum",
+    "cksum",
+    "diff",
+    "cmp",
+    // Environment / identity.
+    "echo",
+    "printf",
+    "env",
+    "printenv",
+    "whoami",
+    "id",
+    "hostname",
+    "uname",
+    "date",
+    "which",
+    "where",
+    "whereis",
+    "jq",
+    "man",
+    "info",
+];
+
+/// Case-insensitive membership test for [`READ_ONLY_COMMANDS`].
+///
+/// Matches on the stem like [`is_destructive_name`], so `ls.exe` and
+/// `find.exe` resolve to their entries.
+fn is_read_only_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let stem = lower.split_once('.').map(|(s, _)| s).unwrap_or(&lower);
+    READ_ONLY_COMMANDS.contains(&lower.as_str()) || READ_ONLY_COMMANDS.contains(&stem)
+}
 
 /// Whether a token is a `NAME=value` environment assignment rather than a word.
 ///
@@ -504,11 +601,30 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         return;
     }
 
-    let mut targets: Vec<&Token> = tokens
-        .iter()
-        .skip(1)
-        .filter(|t| !t.is_flag() && !t.is_operator)
-        .collect();
+    // A read-only program has no write targets among its operands, so grading
+    // them as if it did is wrong. `is_catastrophic_target` protects everything
+    // under `C:\Users` that is outside the working directory, so grading the
+    // operands of a plain lookup turned routine commands into hard denials:
+    //
+    //   ls ~/go/bin 2>/dev/null
+    //   where -a httpx; find ~/ -maxdepth 4 -iname "httpx.exe" 2>/dev/null
+    //
+    // were both reported as "would destroy a protected path" — the `2>/dev/null`
+    // redirect is a write, so the segment was inspected at all, and then every
+    // *read* path in it was graded as a write target. The redirect target is
+    // still graded (a redirect really does truncate), which is why this only
+    // skips the non-redirect operands.
+    let read_only = is_read_only_name(&program_name) && !triggered;
+
+    let mut targets: Vec<&Token> = if read_only {
+        Vec::new()
+    } else {
+        tokens
+            .iter()
+            .skip(1)
+            .filter(|t| !t.is_flag() && !t.is_operator)
+            .collect()
+    };
     targets.extend(redirect_targets.iter().copied());
 
     // A destructive command fed by a pipe takes its operands from the previous

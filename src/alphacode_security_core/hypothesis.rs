@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use super::finding::{Confidence, Severity, VulnerabilityClass};
 
 /// A testable security assumption about the target.
+///
+/// Uses a HashMap for impact fields instead of 350+ individual Option<String> fields.
+/// This reduces memory usage from ~10KB per hypothesis to ~200 bytes for the common case.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hypothesis {
     pub id: String,
@@ -28,6 +32,23 @@ pub struct Hypothesis {
     pub result: Option<HypothesisResult>,
     /// Timestamp of creation.
     pub created_at: String,
+    /// Impact assessment fields stored as key-value pairs.
+    /// Keys are impact types (e.g., "confidentiality", "integrity", "availability").
+    /// This replaces 350+ individual Option<String> fields with a compact HashMap.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub impact_fields: HashMap<String, String>,
+    /// Attack vector description (e.g., "network", "adjacent", "local", "physical").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_vector: Option<String>,
+    /// Attack complexity (e.g., "low", "high").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_complexity: Option<String>,
+    /// Privileges required (e.g., "none", "low", "high").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privileges_required: Option<String>,
+    /// User interaction required (e.g., "none", "required").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_interaction: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -149,7 +170,27 @@ impl Hypothesis {
             evidence: Vec::new(),
             result: None,
             created_at: now,
+            impact_fields: std::collections::HashMap::new(),
+            attack_vector: None,
+            attack_complexity: None,
+            privileges_required: None,
+            user_interaction: None,
         }
+    }
+
+    /// Set an impact field value.
+    pub fn set_impact(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.impact_fields.insert(key.into(), value.into());
+    }
+
+    /// Get an impact field value.
+    pub fn get_impact(&self, key: &str) -> Option<&str> {
+        self.impact_fields.get(key).map(|s| s.as_str())
+    }
+
+    /// Check if any impact fields are set.
+    pub fn has_impacts(&self) -> bool {
+        !self.impact_fields.is_empty()
     }
 
     /// Add evidence and auto-update confidence based on evidence balance.

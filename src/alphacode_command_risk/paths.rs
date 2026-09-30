@@ -375,6 +375,15 @@ pub fn classify_target(
     recursive: bool,
     ctx: &RiskContext,
 ) -> Option<RiskFinding> {
+    // The three device sinks are checked against the *raw* text, before
+    // expansion. `expand` rewrites a POSIX-looking `/dev/null` into a Windows
+    // path (`C:\dev\null`), so the exemption below — which compares against
+    // `/dev/null` — was unreachable on Windows. Every `cmd 2>/dev/null` was
+    // therefore graded as a write to a path outside the working directory.
+    if is_safe_device_sink(Path::new(raw)) {
+        return None;
+    }
+
     // Glob and variable expansion we did not perform: we cannot know the
     // footprint, so escalate rather than guess.
     if raw.contains('*') || raw.contains('?') {

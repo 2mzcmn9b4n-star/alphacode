@@ -79,7 +79,7 @@ impl Tool for PlanModeTool {
                         let preview = if total_len > 8000 {
                             format!(
                                 "{}...\n\n[File truncated: {} total chars, showing first 8000]",
-                                &content[..8000],
+                                &content[..content.floor_char_boundary(8000)],
                                 total_len
                             )
                         } else {

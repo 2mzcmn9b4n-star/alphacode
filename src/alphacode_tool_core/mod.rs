@@ -16,10 +16,11 @@ pub fn intent_schema_property() -> Value {
     })
 }
 
-/// Ensure a tool parameter schema declares the shared `intent` property and
-/// marks it required. Applied centrally when converting tools to provider
-/// definitions so every tool (including MCP proxies) asks the model for an
-/// intent without each tool wiring it manually.
+/// Ensure a tool parameter schema declares the shared `intent` property.
+/// The property is optional (not added to `required`) because every tool
+/// deserializes it as `Option<String>` with `#[serde(default)]`. Marking it
+/// required in the schema confuses models into sending malformed calls
+/// (e.g. empty objects or missing required fields like `command`/`file_path`).
 pub fn ensure_intent_in_schema(mut schema: Value) -> Value {
     let Some(object) = schema.as_object_mut() else {
         return schema;
@@ -41,22 +42,6 @@ pub fn ensure_intent_in_schema(mut schema: Value) -> Value {
         properties
             .entry("intent")
             .or_insert_with(intent_schema_property);
-    } else {
-        return schema;
-    }
-
-    match object.get_mut("required") {
-        Some(Value::Array(required)) => {
-            if !required.iter().any(|v| v.as_str() == Some("intent")) {
-                required.push(Value::String("intent".to_string()));
-            }
-        }
-        _ => {
-            object.insert(
-                "required".to_string(),
-                Value::Array(vec![Value::String("intent".to_string())]),
-            );
-        }
     }
 
     schema
@@ -229,7 +214,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ensure_intent_adds_property_and_required() {
+    fn ensure_intent_adds_property_without_required() {
         let schema = serde_json::json!({
             "type": "object",
             "required": ["command"],
@@ -239,6 +224,7 @@ mod tests {
         });
         let out = ensure_intent_in_schema(schema);
         assert!(out["properties"]["intent"].is_object());
+        // intent must NOT be added to required — it is Option<String> at runtime
         let required: Vec<_> = out["required"]
             .as_array()
             .unwrap()
@@ -246,17 +232,18 @@ mod tests {
             .filter_map(|v| v.as_str())
             .collect();
         assert!(required.contains(&"command"));
-        assert!(required.contains(&"intent"));
+        assert!(!required.contains(&"intent"));
     }
 
     #[test]
-    fn ensure_intent_creates_required_array_when_missing() {
+    fn ensure_intent_does_not_create_required_array() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {}
         });
         let out = ensure_intent_in_schema(schema);
-        assert_eq!(out["required"], serde_json::json!(["intent"]));
+        // No required array should be created just for intent
+        assert!(out.get("required").is_none());
     }
 
     #[test]
@@ -270,6 +257,7 @@ mod tests {
         });
         let out = ensure_intent_in_schema(schema);
         assert_eq!(out["properties"]["intent"]["description"], "custom");
+        // If a tool already has intent in required, we don't duplicate it
         assert_eq!(
             out["required"]
                 .as_array()

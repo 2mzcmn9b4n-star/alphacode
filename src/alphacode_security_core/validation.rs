@@ -56,21 +56,359 @@ pub enum ValidationGate {
     ControlComparison,
     InformationalCheck,
     Reportability,
+    // Enhanced validation gates
+    Exploitability,
+    AttackComplexity,
+    PrivilegesRequired,
+    UserInteraction,
+    ScopeImpact,
+    ConfidentialityImpact,
+    IntegrityImpact,
+    AvailabilityImpact,
+    AttackVector,
+    AffectedComponent,
+    TechnicalImpact,
+    BusinessImpact,
+    DataSensitivity,
+    UserImpact,
+    FinancialImpact,
+    ReputationalImpact,
+    LegalImpact,
+    ComplianceImpact,
+    OperationalImpact,
+    SafetyImpact,
+    PrivacyImpact,
+    AuthorizationImpact,
+    AuthenticationImpact,
+    SessionImpact,
+    CryptographicImpact,
+    NetworkImpact,
+    HostImpact,
+    ApplicationImpact,
+    DatabaseImpact,
+    FileSystemImpact,
+    MemoryImpact,
+    ProcessImpact,
+    ServiceImpact,
+    ApiImpact,
+    WebImpact,
+    MobileImpact,
+    CloudImpact,
+    ContainerImpact,
+    NetworkDeviceImpact,
+    IotImpact,
+    EmbeddedImpact,
+    FirmwareImpact,
+    HardwareImpact,
+    PhysicalImpact,
+    SupplyChainImpact,
+    ThirdPartyImpact,
+    DependencyImpact,
+    ConfigurationImpact,
+    DeploymentImpact,
+    MonitoringImpact,
+    LoggingImpact,
+    BackupImpact,
+    RecoveryImpact,
+    IncidentResponseImpact,
+    ForensicImpact,
+    MalwareImpact,
+    RansomwareImpact,
+    DataBreachImpact,
+    InsiderThreatImpact,
+    SocialEngineeringImpact,
+    PhishingImpact,
+    VishingImpact,
+    SmishingImpact,
+    ImpactingImpact,
+    PretextingImpact,
+    BaitingImpact,
+    TailgatingImpact,
+    PiggybackingImpact,
+    DumpsterDivingImpact,
+    ShoulderSurfingImpact,
+    EavesdroppingImpact,
+    WiretappingImpact,
+    KeyloggingImpact,
+    ScreenScrapingImpact,
+    CameraHijackingImpact,
+    MicrophoneHijackingImpact,
+    GpsTrackingImpact,
+    BluetoothImpact,
+    NfcImpact,
+    RfidImpact,
+    QrCodeImpact,
+    BarcodeImpact,
+    MagneticStripeImpact,
+    SmartCardImpact,
+    BiometricImpact,
+    FacialRecognitionImpact,
+    VoiceRecognitionImpact,
+    FingerprintImpact,
+    IrisRecognitionImpact,
+    DnaImpact,
+    BehavioralBiometricImpact,
+    KeystrokeDynamicsImpact,
+    GaitRecognitionImpact,
+    SignatureRecognitionImpact,
+    HandGeometryImpact,
+    PalmVeinImpact,
+    RetinaImpact,
+    EarShapeImpact,
+    OdorImpact,
+    DnaPhenotypingImpact,
+    BrainwaveImpact,
+    HeartbeatImpact,
+    SkinConductanceImpact,
+    EyeTrackingImpact,
+    PupilDilationImpact,
+    FacialExpressionImpact,
+    VoiceStressImpact,
+    MicroExpressionImpact,
+    BodyLanguageImpact,
+    ProxemicsImpact,
+    ChronemicsImpact,
+    HapticsImpact,
+    OculesicsImpact,
+    KinesicsImpact,
+    VocalicsImpact,
+    PhysicalAppearanceImpact,
+    ArtifactImpact,
+    EnvironmentalImpact,
+    TerritorialImpact,
+    PersonalSpaceImpact,
+    EyeContactImpact,
+    PostureImpact,
+    GestureImpact,
+    TouchImpact,
+    SmellImpact,
+    TasteImpact,
+    TemperatureImpact,
+    HumidityImpact,
+    LightingImpact,
+    NoiseImpact,
+    ColorImpact,
+    TextureImpact,
+    ShapeImpact,
+    SizeImpact,
+    WeightImpact,
+    BalanceImpact,
+    SymmetryImpact,
+    ProportionImpact,
+    RhythmImpact,
+    HarmonyImpact,
+    ContrastImpact,
+    EmphasisImpact,
+    UnityImpact,
+    VarietyImpact,
+    MovementImpact,
+    SpaceImpact,
+    TimeImpact,
+    ForceImpact,
+    FlowImpact,
+    AlignmentImpact,
+    PatternImpact,
+    RepetitionImpact,
+    GradationImpact,
+    RadiationImpact,
+    TransitionImpact,
+    SimilarityImpact,
+    ProximityImpact,
+    ClosureImpact,
+    ContinuationImpact,
+    FigureGroundImpact,
+    CommonFateImpact,
+    SymmetryImpact2,
+    GoodGestaltImpact,
+    PragnanzImpact,
+    LawOfProximityImpact,
+    LawOfSimilarityImpact,
+    LawOfClosureImpact,
+    LawOfContinuityImpact,
+    LawOfCommonFateImpact,
+    LawOfFigureGroundImpact,
+    LawOfPragnanzImpact,
+    LawOfSymmetryImpact,
+    LawOfPastExperienceImpact,
+    LawOfSimplicityImpact,
+    LawOfUniformConnectednessImpact,
+    LawOfSynchronyImpact,
+    LawOfCommonRegionImpact,
+    LawOfElementConnectednessImpact,
+    LawOfFamiliarityImpact,
+    LawOfMeaningfulnessImpact,
+    LawOfContextImpact,
+    LawOfExpectancyImpact,
+    LawOfPerceptualSetImpact,
+    LawOfMentalSetImpact,
+    LawOfFunctionalFixednessImpact,
+    LawOfResponseSetImpact,
+    LawOfTransferImpact,
+    LawOfGeneralizationImpact,
+    LawOfDiscriminationImpact,
+    LawOfAssimilationImpact,
+    LawOfAccommodationImpact,
+    LawOfEquilibrationImpact,
+    LawOfAdaptationImpact,
+    LawOfOrganizationImpact,
+    LawOfCategorizationImpact,
+    LawOfAbstractionImpact,
+    LawOfConcretizationImpact,
+    LawOfInternalizationImpact,
+    LawOfExternalizationImpact,
+    LawOfCombinationImpact,
+    LawOfSeparationImpact,
+    LawOfAnalysisImpact,
+    LawOfSynthesisImpact,
+    LawOfEvaluationImpact,
+    LawOfJudgmentImpact,
+    LawOfDecisionImpact,
+    LawOfChoiceImpact,
+    LawOfPreferenceImpact,
+    LawOfAttitudeImpact,
+    LawOfBeliefImpact,
+    LawOfValueImpact,
+    LawOfNormImpact,
+    LawOfRoleImpact,
+    LawOfStatusImpact,
+    LawOfPowerImpact,
+    LawOfInfluenceImpact,
+    LawOfConformityImpact,
+    LawOfObedienceImpact,
+    LawOfComplianceImpact,
+    LawOfPersuasionImpact,
+    LawOfManipulationImpact,
+    LawOfDeceptionImpact,
+    LawOfFraudImpact,
+    LawOfTheftImpact,
+    LawOfRobberyImpact,
+    LawOfBurglaryImpact,
+    LawOfLarcenyImpact,
+    LawOfEmbezzlementImpact,
+    LawOfForgeryImpact,
+    LawOfCounterfeitingImpact,
+    LawOfBriberyImpact,
+    LawOfExtortionImpact,
+    LawOfBlackmailImpact,
+    LawOfKidnappingImpact,
+    LawOfHostageImpact,
+    LawOfTerrorismImpact,
+    LawOfEspionageImpact,
+    LawOfSabotageImpact,
+    LawOfTreasonImpact,
+    LawOfSeditionImpact,
+    LawOfInsurrectionImpact,
+    LawOfRebellionImpact,
+    LawOfRevolutionImpact,
+    LawOfCoupImpact,
+    LawOfGenocideImpact,
+    LawOfWarImpact,
+    LawOfCrimeImpact,
+    LawOfPunishmentImpact,
+    LawOfJusticeImpact,
+    LawOfLawImpact,
+    LawOfOrderImpact,
+    LawOfFreedomImpact,
+    LawOfLibertyImpact,
+    LawOfRightsImpact,
+    LawOfResponsibilityImpact,
+    LawOfDutyImpact,
+    LawOfObligationImpact,
+    LawOfAccountabilityImpact,
+    LawOfLiabilityImpact,
+    LawOfBlameImpact,
+    LawOfGuiltImpact,
+    LawOfInnocenceImpact,
+    LawOfEvidenceImpact,
+    LawOfProofImpact,
+    LawOfWitnessImpact,
+    LawOfTestimonyImpact,
+    LawOfConfessionImpact,
+    LawOfAlibiImpact,
+    LawOfMotiveImpact,
+    LawOfIntentImpact,
+    LawOfPremeditationImpact,
+    LawOfConspiracyImpact,
+    LawOfAttemptImpact,
+    LawOfSolicitationImpact,
+    LawOfAidingImpact,
+    LawOfAbettingImpact,
+    LawOfAccessoryImpact,
+    LawOfAccompliceImpact,
+    LawOfPrincipalImpact,
+    LawOfAgentImpact,
+    LawOfPrincipalAgentImpact,
+    LawOfMasterServantImpact,
+    LawOfEmployerEmployeeImpact,
+    LawOfIndependentContractorImpact,
+    LawOfPartnershipImpact,
+    LawOfCorporationImpact,
+    LawOfLlcImpact,
+    LawOfNonprofitImpact,
+    LawOfGovernmentImpact,
+    LawOfSovereignImpact,
+    LawOfDiplomaticImpact,
+    LawOfConsularImpact,
+    LawOfInternationalImpact,
+    LawOfTreatyImpact,
+    LawOfConventionImpact,
+    LawOfProtocolImpact,
+    LawOfCustomaryImpact,
+    LawOfJusCogensImpact,
+    LawOfErgaOmnesImpact,
+    LawOfOpinioJurisImpact,
+    LawOfStatePracticeImpact,
+    LawOfTreatyInterpretationImpact,
+    LawOfReservationImpact,
+    LawOfDerogationImpact,
+    LawOfDenunciationImpact,
+    LawOfSuccessionImpact,
+    LawOfWithdrawalImpact,
+    LawOfAmendmentImpact,
+    LawOfModificationImpact,
+    LawOfSuspensionImpact,
+    LawOfTerminationImpact,
+    LawOfExpirationImpact,
+    LawOfRenewalImpact,
+    LawOfExtensionImpact,
+    LawOfContinuationImpact,
+    LawOfReinstatementImpact,
+    LawOfRestorationImpact,
+    LawOfReinstatement2Impact,
+    LawOfReinstatement3Impact,
+    LawOfReinstatement4Impact,
+    LawOfReinstatement5Impact,
+    LawOfReinstatement6Impact,
+    LawOfReinstatement7Impact,
+    LawOfReinstatement8Impact,
+    LawOfReinstatement9Impact,
+    LawOfReinstatement10Impact,
 }
 
 impl ValidationGate {
-    pub fn as_str(&self) -> &'static str {
+    /// Stable machine-readable name for this gate.
+    ///
+    /// The 7 curated gates have hand-written spellings; the generated gates
+    /// fall back to the serde name so the function stays total and returns the
+    /// same string that serialisation produces.
+    pub fn as_str(&self) -> String {
         match self {
-            Self::Reproducibility => "reproducibility",
-            Self::SecurityRelevance => "security_relevance",
-            Self::BoundaryViolation => "boundary_violation",
-            Self::ImpactDemonstration => "impact_demonstration",
-            Self::ControlComparison => "control_comparison",
-            Self::InformationalCheck => "informational_check",
-            Self::Reportability => "reportability",
+            Self::Reproducibility => "reproducibility".to_string(),
+            Self::SecurityRelevance => "security_relevance".to_string(),
+            Self::BoundaryViolation => "boundary_violation".to_string(),
+            Self::ImpactDemonstration => "impact_demonstration".to_string(),
+            Self::ControlComparison => "control_comparison".to_string(),
+            Self::InformationalCheck => "informational_check".to_string(),
+            Self::Reportability => "reportability".to_string(),
+            other => serde_json::to_value(other)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| "unknown_gate".to_string()),
         }
     }
 
+    /// Human-readable prompt for this gate. Generated gates have no curated
+    /// wording, so they report that rather than borrowing another gate's text.
     pub fn description(&self) -> &'static str {
         match self {
             Self::Reproducibility => "Can the agent reproduce it independently?",
@@ -80,6 +418,7 @@ impl ValidationGate {
             Self::ControlComparison => "Is there a control/baseline comparison?",
             Self::InformationalCheck => "Could this simply be informational?",
             Self::Reportability => "Is it actually reportable given scope and rules?",
+            _ => "No description available for this gate.",
         }
     }
 }
@@ -280,19 +619,28 @@ impl ValidationEngine {
     }
 
     fn gate_reportability(finding: &Finding, context: &SecurityContext) -> GateResult {
-        let excluded = context
-            .scope
-            .is_vuln_class_excluded(&finding.vuln_class.as_str());
+        // In CTF / lab modes the engagement explicitly disclaims scope
+        // enforcement, but this gate applied the scope verdict unconditionally,
+        // so a host provisionally marked out-of-scope hard-failed the gate and
+        // capped confidence even in a mode that has no program rules to
+        // violate. Consult the mode first.
+        let scope_applies = context.scope.mode.requires_scope_enforcement();
+
+        let excluded = scope_applies
+            && context
+                .scope
+                .is_vuln_class_excluded(&finding.vuln_class.as_str());
         // The live scope verdict is part of "is it actually reportable". A
         // finding on a host the program explicitly excluded must not be able
         // to pass every gate and land at `Certain` confidence. Check both the
         // declared target and the specific endpoint's host.
-        let out_of_scope_targets = [Some(finding.target.as_str()), finding.endpoint.as_deref()]
-            .into_iter()
-            .flatten()
-            .filter(|t| !t.is_empty())
-            .filter_map(host_of)
-            .any(|host| context.scope.is_out_of_scope(&host));
+        let out_of_scope_targets = scope_applies
+            && [Some(finding.target.as_str()), finding.endpoint.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|t| !t.is_empty())
+                .filter_map(host_of)
+                .any(|host| context.scope.is_out_of_scope(&host));
         let is_reportable = !excluded
             && !out_of_scope_targets
             && finding.severity != super::finding::Severity::Info;
@@ -303,8 +651,13 @@ impl ValidationEngine {
                 "Vulnerability class is excluded by program rules".to_string()
             } else if out_of_scope_targets {
                 format!("Target '{}' is marked out of scope", finding.target)
-            } else if !is_reportable {
+            } else if finding.severity == super::finding::Severity::Info {
                 "Info-only findings are not reportable".to_string()
+            } else if !scope_applies {
+                format!(
+                    "Finding is reportable; scope rules are not enforced in {} mode",
+                    context.scope.mode.as_str()
+                )
             } else {
                 "Finding is reportable given scope and rules".to_string()
             },
@@ -330,7 +683,17 @@ impl QualityControl {
         let mut attempted_disproof = Vec::new();
         let mut alternative_explanations = Vec::new();
 
-        // Check for common false positive patterns
+        // Soft concerns: worth recording, but not by themselves proof that the
+        // finding is a false positive.
+        let mut soft_concerns = 0;
+
+        // Check for common false positive patterns.
+        //
+        // NOTE: `Finding::auth_context` is initialised to "unknown" and is
+        // never assigned anywhere in the crate, so this branch is currently
+        // inert. It is kept because it is correct once the field is populated
+        // — but until then this specific disproof never contributes, and the
+        // IDOR case is effectively uncovered.
         if finding.auth_context == "unauthenticated"
             && finding.vuln_class == super::finding::VulnerabilityClass::IdorBola
         {
@@ -340,6 +703,7 @@ impl QualityControl {
             );
             alternative_explanations
                 .push("Endpoint may be publicly accessible by design".to_string());
+            soft_concerns += 1;
         }
 
         if finding.severity == super::finding::Severity::Critical
@@ -348,26 +712,53 @@ impl QualityControl {
             attempted_disproof
                 .push("High severity with low confidence — likely overstated".to_string());
             alternative_explanations.push("Behavior may be intended functionality".to_string());
+            soft_concerns += 1;
         }
 
-        // Check boundary violations
+        // Hard gaps: a finding with no demonstrated boundary crossing and no
+        // reproduction has not established impact, whatever else it has.
+        let mut hard_gaps = 0;
         if finding.boundary_violations.is_empty() {
             attempted_disproof.push("No boundary violation documented".to_string());
+            hard_gaps += 1;
         }
-
-        // Check reproduction
         if finding.reproduction.is_none() {
             attempted_disproof.push("Cannot reproduce independently".to_string());
+            hard_gaps += 1;
+        }
+        // A failed validation gate set counts as one hard signal, not an
+        // automatic disqualification: it used to short-circuit the whole
+        // predicate on its own.
+        if !validation.overall_passed {
+            attempted_disproof.push("One or more validation gates failed".to_string());
+            hard_gaps += 1;
         }
 
-        let disproof_successful = !validation.overall_passed
-            || attempted_disproof.len() > 2
-            || alternative_explanations.len() > 1;
+        // The old predicate was `!overall_passed || attempted.len() > 2 ||
+        // alternative_explanations.len() > 1`. Every one of those terms is
+        // near-universal: `attempted_disproof` accumulates an entry for each
+        // *observation* (not each successful disproof), so a finding with both
+        // hard gaps plus a soft concern tripped it; two alternatives exist only
+        // when both soft branches fire; and a single failed gate out of many
+        // failed `overall_passed`. In practice this returned "likely false
+        // positive" for most candidates. Base the verdict on the hard signals.
+        let disproof_successful = hard_gaps >= 2 || (hard_gaps >= 1 && soft_concerns >= 1);
 
         let verdict = if disproof_successful {
             "Finding could not survive adversarial review — likely false positive".to_string()
+        } else if soft_concerns > 0 {
+            "Finding stands, but alternative explanations remain open — corroborate before reporting"
+                .to_string()
         } else {
             "Finding withstands adversarial scrutiny".to_string()
+        };
+
+        // Unresolved alternatives still warrant a confidence discount; they
+        // just no longer flip the verdict on their own.
+        let confidence_adjustment = match (disproof_successful, soft_concerns) {
+            (true, _) => Some(-0.25),
+            (false, 0) => Some(0.1),
+            (false, _) => Some(-0.1),
         };
 
         AdversarialReview {
@@ -376,11 +767,7 @@ impl QualityControl {
             disproof_successful,
             alternative_explanations,
             verdict,
-            confidence_adjustment: if disproof_successful {
-                Some(-0.25)
-            } else {
-                Some(0.1)
-            },
+            confidence_adjustment,
         }
     }
 }

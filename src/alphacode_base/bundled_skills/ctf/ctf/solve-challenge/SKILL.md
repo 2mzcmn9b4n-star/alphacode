@@ -191,6 +191,57 @@ r.interactive()
 "
 ```
 
+## Automated Solver Pipeline
+
+When you have the `ctf_auto_solver` tool available, use it for rapid triage:
+
+```
+1. Run challenge_classifier on the challenge directory
+2. Run ctf_auto_solver for automated analysis
+3. Use flag_scanner for quick flag discovery
+4. Load category-specific skill based on classification
+5. Apply category-specific techniques
+6. Verify and submit
+```
+
+### Parallel Analysis Commands
+
+Run these in parallel for maximum speed:
+
+```bash
+# File analysis (parallel)
+(file *; echo "---"; ls -la) &
+(strings * 2>/dev/null | grep -iE 'flag|ctf|password|key|admin' | head -20) &
+(checksec --file=* 2>/dev/null) &
+(xxd * 2>/dev/null | head -30) &
+wait
+
+# Flag search (parallel)
+grep -rnEi '(flag|ctf|htb|pico)\{[^}]+\}' . 2>/dev/null &
+find . -type f -exec sh -c 'strings "$1" | grep -qE "(flag|ctf)\{" && echo "$1"' _ {} \; &
+wait
+```
+
+### CTFd Integration
+
+If CTFd platform is detected:
+
+```bash
+# Get challenge info
+curl -sH "Authorization: Token $CTF_TOKEN" "$CTF_URL/api/v1/challenges" | \
+  jq '.data[] | {id, name, category, value, solves, files}'
+
+# Download challenge files
+curl -sH "Authorization: Token $CTF_TOKEN" "$CTF_URL/api/v1/challenges/$CHALLENGE_ID/files" | \
+  jq -r '.data[] | "\(.url) \(.name)"'
+
+# Submit flag
+curl -sX POST -H "Authorization: Token $CTF_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"challenge_id\": $CHALLENGE_ID, \"flag\": \"$FLAG\"}" \
+  "$CTF_URL/api/v1/challenges/attempt"
+```
+
 ## Challenge
 
 $ARGUMENTS

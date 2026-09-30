@@ -107,6 +107,7 @@ impl ActionSpace {
         let mut space = Self::new();
         // Recon / analysis primitives mapped to existing tool capabilities.
         let defs = vec![
+            // Basic recon actions
             (
                 "http_probe",
                 "HTTP request + header/body capture",
@@ -124,6 +125,55 @@ impl ActionSpace {
                 0.6,
             ),
             (
+                "subdomain_enum",
+                "Enumerate subdomains via passive and active techniques",
+                ActionClass::Tool,
+                0.4,
+                0.05,
+                0.8,
+            ),
+            (
+                "port_scan",
+                "Scan for open ports and services",
+                ActionClass::Tool,
+                0.5,
+                0.15,
+                0.7,
+            ),
+            (
+                "tech_fingerprint",
+                "Identify technology stack and versions",
+                ActionClass::Tool,
+                0.3,
+                0.05,
+                0.75,
+            ),
+            (
+                "js_analysis",
+                "Analyze JavaScript files for endpoints and secrets",
+                ActionClass::Tool,
+                0.4,
+                0.05,
+                0.7,
+            ),
+            (
+                "wayback_analysis",
+                "Analyze historical URLs from Wayback Machine",
+                ActionClass::Tool,
+                0.3,
+                0.0,
+                0.6,
+            ),
+            (
+                "github_recon",
+                "Search GitHub for exposed secrets and configs",
+                ActionClass::Tool,
+                0.4,
+                0.05,
+                0.65,
+            ),
+            // Authentication & Authorization testing
+            (
                 "auth_compare",
                 "Compare authenticated vs unauthenticated behavior",
                 ActionClass::Composed,
@@ -131,6 +181,236 @@ impl ActionSpace {
                 0.1,
                 0.9,
             ),
+            (
+                "jwt_analysis",
+                "Analyze JWT tokens for weaknesses",
+                ActionClass::Tool,
+                0.3,
+                0.05,
+                0.7,
+            ),
+            (
+                "oauth_test",
+                "Test OAuth/OIDC implementation for flaws",
+                ActionClass::Tool,
+                0.5,
+                0.1,
+                0.75,
+            ),
+            (
+                "session_test",
+                "Test session management for vulnerabilities",
+                ActionClass::Tool,
+                0.4,
+                0.1,
+                0.7,
+            ),
+            (
+                "mfa_bypass",
+                "Test MFA implementation for bypass techniques",
+                ActionClass::Tool,
+                0.6,
+                0.2,
+                0.8,
+            ),
+            (
+                "privilege_escalation",
+                "Test for privilege escalation vulnerabilities",
+                ActionClass::Tool,
+                0.5,
+                0.15,
+                0.85,
+            ),
+            // Injection testing
+            (
+                "sqli_test",
+                "Test for SQL injection vulnerabilities",
+                ActionClass::Tool,
+                0.4,
+                0.1,
+                0.8,
+            ),
+            (
+                "xss_test",
+                "Test for XSS vulnerabilities",
+                ActionClass::Tool,
+                0.3,
+                0.05,
+                0.75,
+            ),
+            (
+                "command_injection_test",
+                "Test for command injection vulnerabilities",
+                ActionClass::Tool,
+                0.5,
+                0.15,
+                0.85,
+            ),
+            (
+                "ssrf_test",
+                "Test for SSRF vulnerabilities",
+                ActionClass::Tool,
+                0.5,
+                0.15,
+                0.8,
+            ),
+            (
+                "xxe_test",
+                "Test for XXE vulnerabilities",
+                ActionClass::Tool,
+                0.4,
+                0.1,
+                0.75,
+            ),
+            (
+                "ssti_test",
+                "Test for SSTI vulnerabilities",
+                ActionClass::Tool,
+                0.4,
+                0.1,
+                0.75,
+            ),
+            (
+                "ldap_injection_test",
+                "Test for LDAP injection vulnerabilities",
+                ActionClass::Tool,
+                0.4,
+                0.1,
+                0.7,
+            ),
+            (
+                "nosql_injection_test",
+                "Test for NoSQL injection vulnerabilities",
+                ActionClass::Tool,
+                0.4,
+                0.1,
+                0.7,
+            ),
+            // API testing
+            (
+                "graphql_test",
+                "Test GraphQL implementation for vulnerabilities",
+                ActionClass::Tool,
+                0.5,
+                0.1,
+                0.8,
+            ),
+            (
+                "api_fuzz",
+                "Fuzz API endpoints for vulnerabilities",
+                ActionClass::Tool,
+                0.5,
+                0.15,
+                0.75,
+            ),
+            (
+                "rate_limit_test",
+                "Test rate limiting implementation",
+                ActionClass::Tool,
+                0.3,
+                0.1,
+                0.6,
+            ),
+            (
+                "pagination_test",
+                "Test pagination for data exposure",
+                ActionClass::Tool,
+                0.3,
+                0.05,
+                0.65,
+            ),
+            // File & Upload testing
+            (
+                "file_upload_test",
+                "Test file upload functionality",
+                ActionClass::Tool,
+                0.4,
+                0.1,
+                0.7,
+            ),
+            (
+                "path_traversal_test",
+                "Test for path traversal vulnerabilities",
+                ActionClass::Tool,
+                0.4,
+                0.1,
+                0.75,
+            ),
+            (
+                "lfi_test",
+                "Test for local file inclusion",
+                ActionClass::Tool,
+                0.4,
+                0.1,
+                0.7,
+            ),
+            // Configuration testing
+            (
+                "cors_test",
+                "Test CORS configuration",
+                ActionClass::Tool,
+                0.2,
+                0.05,
+                0.6,
+            ),
+            (
+                "security_headers_check",
+                "Check security headers implementation",
+                ActionClass::Tool,
+                0.2,
+                0.0,
+                0.5,
+            ),
+            (
+                "cookie_security_test",
+                "Test cookie security attributes",
+                ActionClass::Tool,
+                0.2,
+                0.05,
+                0.55,
+            ),
+            (
+                "tls_configuration_test",
+                "Test TLS/SSL configuration",
+                ActionClass::Tool,
+                0.3,
+                0.05,
+                0.6,
+            ),
+            // Business logic testing
+            (
+                "workflow_bypass_test",
+                "Test for workflow bypass vulnerabilities",
+                ActionClass::Tool,
+                0.5,
+                0.15,
+                0.8,
+            ),
+            (
+                "payment_manipulation_test",
+                "Test payment processing for manipulation",
+                ActionClass::Tool,
+                0.6,
+                0.2,
+                0.85,
+            ),
+            (
+                "race_condition_test",
+                "Test for race condition vulnerabilities",
+                ActionClass::Tool,
+                0.5,
+                0.15,
+                0.75,
+            ),
+            (
+                "business_logic_fuzz",
+                "Fuzz business logic parameters",
+                ActionClass::Tool,
+                0.5,
+                0.15,
+                0.7,
+            ),
+            // Verification actions
             (
                 "replay_request",
                 "Replay captured request to test reproducibility",
@@ -156,6 +436,23 @@ impl ActionSpace {
                 0.2,
             ),
             (
+                "false_positive_check",
+                "Verify finding is not a false positive",
+                ActionClass::Verification,
+                0.4,
+                0.05,
+                0.9,
+            ),
+            (
+                "impact_assessment",
+                "Assess real-world impact of finding",
+                ActionClass::Verification,
+                0.3,
+                0.05,
+                0.7,
+            ),
+            // Swarm & delegation actions
+            (
                 "spawn_verifier",
                 "Delegate to independent verifier agent",
                 ActionClass::SwarmDelegation,
@@ -163,6 +460,23 @@ impl ActionSpace {
                 0.1,
                 0.5,
             ),
+            (
+                "spawn_specialist",
+                "Delegate to specialist agent for deep testing",
+                ActionClass::SwarmDelegation,
+                0.8,
+                0.15,
+                0.6,
+            ),
+            (
+                "parallel_recon",
+                "Run parallel reconnaissance agents",
+                ActionClass::SwarmDelegation,
+                0.6,
+                0.1,
+                0.7,
+            ),
+            // Recovery actions
             (
                 "retry_with_backoff",
                 "Retry transient failure with backoff",
@@ -178,6 +492,14 @@ impl ActionSpace {
                 0.3,
                 0.05,
                 0.4,
+            ),
+            (
+                "escalate_to_human",
+                "Escalate complex finding to human analyst",
+                ActionClass::Recovery,
+                0.5,
+                0.0,
+                0.3,
             ),
         ];
         for (id, desc, class, cost, risk, gain) in defs {
@@ -223,11 +545,26 @@ impl ActionSpace {
         action
     }
 
+    /// Record that `action_id` separates hypotheses `hypo_a` and `hypo_b`.
+    ///
+    /// Repeating the same pair carries no extra information but still inflated
+    /// `discrimination_bonus`, which counts entries and saturates at 0.75 — so
+    /// a re-registered pair could push an action to the maximum bonus without
+    /// discriminating anything. (`EvidenceGraph::link_evidence` already
+    /// deduped; this did not.) Treat the pair as unordered, since (a, b) and
+    /// (b, a) separate exactly the same pair of hypotheses.
     pub fn mark_discriminates(&mut self, action_id: &str, hypo_a: &str, hypo_b: &str) {
-        self.discrimination
+        let entry = self
+            .discrimination
             .entry(action_id.to_string())
-            .or_default()
-            .push((hypo_a.to_string(), hypo_b.to_string()));
+            .or_default();
+        if entry
+            .iter()
+            .any(|(a, b)| a == hypo_a && b == hypo_b || a == hypo_b && b == hypo_a)
+        {
+            return;
+        }
+        entry.push((hypo_a.to_string(), hypo_b.to_string()));
     }
 
     pub fn discrimination_bonus(&self, action_id: &str) -> f32 {
@@ -240,6 +577,15 @@ impl ActionSpace {
     }
 
     /// Filter to affordable, safe, untried actions. Prevents repeating failures.
+    ///
+    /// The doc comment used to say "untried" while the code read
+    /// `!tried.contains(&a.id) || a.class == ActionClass::Verification`, which
+    /// re-admitted every verification action no matter how many times it had
+    /// run. Since [`ranked`] is deterministic (score, then id) and
+    /// `outcome_bonus` is clamped, an unchanged state re-selected the same
+    /// action on every pass and the cycle never advanced. Re-verification is
+    /// now an explicit request — see [`Self::reverifiable`] — rather than a
+    /// side effect of the action's class.
     pub fn affordable(
         &self,
         tried: &HashSet<String>,
@@ -250,7 +596,28 @@ impl ActionSpace {
         self.actions
             .values()
             .filter(|a| !failed.contains(&a.id))
-            .filter(|a| !tried.contains(&a.id) || a.class == ActionClass::Verification)
+            .filter(|a| !tried.contains(&a.id))
+            .filter(|a| a.estimated_cost <= max_cost && a.estimated_risk <= max_risk)
+            .collect()
+    }
+
+    /// Verification-class actions a caller may deliberately run a second time.
+    ///
+    /// Re-running a verification action is legitimate when something changed
+    /// (new evidence, an updated hypothesis), but it must be a decision rather
+    /// than a default. Excludes anything that already failed.
+    pub fn reverifiable(
+        &self,
+        tried: &HashSet<String>,
+        failed: &HashSet<String>,
+        max_cost: f32,
+        max_risk: f32,
+    ) -> Vec<&Action> {
+        self.actions
+            .values()
+            .filter(|a| a.class == ActionClass::Verification)
+            .filter(|a| !failed.contains(&a.id))
+            .filter(|a| tried.contains(&a.id))
             .filter(|a| a.estimated_cost <= max_cost && a.estimated_risk <= max_risk)
             .collect()
     }

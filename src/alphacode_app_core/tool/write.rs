@@ -1,4 +1,7 @@
-use super::diff_utils::{build_file_touch_preview, generate_diff_summary};
+use super::diff_utils::{
+    DIFF_MAX_INPUT_BYTES, build_file_touch_preview, content_within_diff_size_limit,
+    file_within_diff_size_limit, generate_diff_summary,
+};
 use super::{Tool, ToolContext, ToolOutput};
 use crate::alphacode_app_core::bus::{Bus, BusEvent, FileOp, FileTouch};
 use anyhow::Result;
@@ -116,20 +119,39 @@ impl Tool for WriteTool {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        // Check if file existed before and read old content for diff
+        // Check if file existed before and read old content for diff.
+        //
+        // The previous content is only used to render a human-readable diff, and
+        // that diff is capped at DIFF_MAX_LINES. Reading a multi-megabyte file
+        // into memory purely to throw almost all of it away costs both the
+        // allocation and the O(n*m) diff work, so skip the read entirely once
+        // the file is past the point where the diff would be truncated anyway.
+        // The size is checked from metadata first, so the content is never
+        // loaded in the first place.
         let existed = path.exists();
-        let old_content = if existed {
+        let old_content = if existed && file_within_diff_size_limit(&path).await {
             tokio::fs::read_to_string(&path).await.ok()
         } else {
             None
         };
+        // A missing old snapshot is ambiguous: either the file is new, or it is
+        // too large to diff. Distinguish them so the output does not claim a
+        // large file was "created" when it was only overwritten.
+        let diff_skipped = existed && old_content.is_none();
 
         // Write the file
         tokio::fs::write(&path, &params.content).await?;
 
         let _new_len = params.content.len();
         let line_count = params.content.lines().count();
-        let diff = if let Some(old) = old_content.as_deref() {
+        // Skip the diff when it was skipped above, and also when the *new*
+        // content alone is too large to diff against nothing.
+        let diff = if diff_skipped || !content_within_diff_size_limit(&params.content) {
+            format!(
+                "(diff skipped: file exceeds the {} KB diff limit; use read to inspect changes)",
+                DIFF_MAX_INPUT_BYTES / 1024
+            )
+        } else if let Some(old) = old_content.as_deref() {
             generate_diff_summary(old, &params.content)
         } else {
             generate_diff_summary("", &params.content)
@@ -164,7 +186,14 @@ impl Tool for WriteTool {
             .with_title(params.file_path.clone()))
         } else {
             // For new files, show all lines as additions
-            let diff = generate_diff_summary("", &params.content);
+            let diff = if content_within_diff_size_limit(&params.content) {
+                generate_diff_summary("", &params.content)
+            } else {
+                format!(
+                    "(diff skipped: file exceeds the {} KB diff limit; use read to inspect it)",
+                    DIFF_MAX_INPUT_BYTES / 1024
+                )
+            };
             Ok(ToolOutput::new(format!(
                 "Created {} ({} lines):\n{}",
                 params.file_path, line_count, diff

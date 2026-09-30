@@ -131,10 +131,10 @@ impl BackgroundTaskManager {
     }
 
     async fn write_status_file(&self, path: &std::path::Path, status: &TaskStatusFile) {
-        if let Ok(json) = serde_json::to_string_pretty(status) {
-            if let Err(e) = fs::write(path, json).await {
-                tracing::warn!("Failed to write status file {}: {}", path.display(), e);
-            }
+        if let Ok(json) = serde_json::to_string_pretty(status)
+            && let Err(e) = fs::write(path, json).await
+        {
+            tracing::warn!("Failed to write status file {}: {}", path.display(), e);
         }
     }
 

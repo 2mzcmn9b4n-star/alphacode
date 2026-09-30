@@ -26,6 +26,12 @@ fn level_of(command: &str) -> RiskLevel {
     assess(command, &ctx()).level
 }
 
+/// Level under an explicit context, for the cases that depend on where the
+/// working directory sits relative to the home directory.
+fn level_with(command: &str, ctx: &RiskContext) -> RiskLevel {
+    assess(command, ctx).level
+}
+
 /// The gate must never classify any of these as `Safe`.
 fn assert_not_safe(command: &str) {
     let level = level_of(command);
@@ -200,6 +206,91 @@ fn rm_in_the_working_directory_is_not_catastrophic() {
     // routine and must not be escalated.
     assert_ne!(level_of("rm -rf target/debug"), RiskLevel::Catastrophic);
     assert_ne!(level_of("rm -f main.rs"), RiskLevel::Catastrophic);
+}
+
+/// A working directory under the home directory, which is the default on
+/// Windows and therefore the shape that produced the false positives.
+fn home_ctx() -> RiskContext {
+    RiskContext {
+        working_dir: Some(if cfg!(windows) {
+            std::path::PathBuf::from("C:\\Users\\tester\\OneDrive\\Desktop\\repo")
+        } else {
+            std::path::PathBuf::from("/home/tester/repo")
+        }),
+        home_dir: Some(if cfg!(windows) {
+            std::path::PathBuf::from("C:\\Users\\tester")
+        } else {
+            std::path::PathBuf::from("/home/tester")
+        }),
+    }
+}
+
+/// These are verbatim commands the gate denied as "would destroy a protected
+/// path". Every segment is read-only (`where`, `echo`, `ls`, `find`, `head`),
+/// and the only reason the segment was inspected at all was the `2>/dev/null`
+/// redirect — a write to `/dev/null`. The read paths under the home directory
+/// were then graded as write targets, and `is_catastrophic_target` protects
+/// everything under `C:\Users` that is outside the working directory.
+#[test]
+fn read_only_lookup_commands_outside_the_working_directory_are_allowed() {
+    let ctx = home_ctx();
+    for cmd in [
+        "ls -1 /c/Users/tester/bin/nuclei.exe && echo NUCLEI_OK",
+        "where -a httpx 2>/dev/null; echo \"--- searching ---\"; ls \"$HOME/go/bin\" 2>/dev/null",
+        "find /c/Users/tester -maxdepth 4 -iname \"httpx.exe\" 2>/dev/null | head -10",
+        "cat ~/bin/httpx 2>/dev/null",
+        "grep -r pattern ~/notes 2>/dev/null",
+    ] {
+        assert_eq!(
+            level_with(cmd, &ctx),
+            RiskLevel::Safe,
+            "read-only command was escalated: {cmd}"
+        );
+    }
+}
+
+/// The fix must not weaken genuine writes. A redirect really does truncate, so
+/// redirecting into the home directory stays flagged.
+#[test]
+fn redirecting_into_the_home_directory_is_still_flagged() {
+    let ctx = home_ctx();
+    assert_ne!(
+        level_with("echo pwned > ~/notes.txt", &ctx),
+        RiskLevel::Safe,
+        "a redirect is a truncation and must still be graded"
+    );
+    assert_ne!(
+        level_with("cat ~/notes.txt > ~/.bashrc", &ctx),
+        RiskLevel::Safe,
+        "overwriting a shell rc file must still be graded"
+    );
+}
+
+/// `sed -i` rewrites in place, so `sed` is deliberately not read-only.
+#[test]
+fn in_place_editors_are_not_treated_as_read_only() {
+    let ctx = home_ctx();
+    assert_ne!(
+        level_with("sed -i 's/a/b/' ~/notes.txt", &ctx),
+        RiskLevel::Safe,
+        "`sed -i` writes in place"
+    );
+}
+
+/// `find` is only read-only without `-delete` / `-exec`; those keep their own
+/// grading path via [`super::CONDITIONALLY_DESTRUCTIVE`].
+#[test]
+fn find_is_read_only_only_without_its_destructive_flags() {
+    let ctx = home_ctx();
+    assert_eq!(
+        level_with("find /c/Users/tester -name '*.txt'", &ctx),
+        RiskLevel::Safe
+    );
+    assert_ne!(
+        level_with("find /c/Users/tester -name '*.txt' -delete", &ctx),
+        RiskLevel::Safe,
+        "`find -delete` must still be graded"
+    );
 }
 
 /// On a default Windows install the project lives at

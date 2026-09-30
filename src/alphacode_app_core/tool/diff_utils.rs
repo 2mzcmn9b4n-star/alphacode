@@ -9,6 +9,35 @@ use similar::{ChangeTag, TextDiff};
 /// Maximum number of diff lines returned by [`generate_diff_summary`].
 pub const DIFF_MAX_LINES: usize = 30;
 
+/// Maximum size, in bytes, of content [`generate_diff_summary`] will be asked
+/// to diff.
+///
+/// The rendered diff is capped at [`DIFF_MAX_LINES`] lines, so past a certain
+/// input size the output is a truncated "everything changed" summary either way.
+/// The real cost is upstream: `similar` builds its line index over the whole
+/// input, and callers such as the `write` tool must first hold the old content
+/// in memory to diff against. That work is proportional to input size and is
+/// pure overhead once the rendered output cannot grow. 1 MiB is far larger
+/// than any file whose diff is meaningfully shown, and small enough that the
+/// worst case stays a bounded allocation.
+pub const DIFF_MAX_INPUT_BYTES: usize = 1024 * 1024;
+
+/// Whether an on-disk file is small enough that loading it for a diff is
+/// worthwhile. Checks metadata so the content is never read just to measure it.
+pub async fn file_within_diff_size_limit(path: &std::path::Path) -> bool {
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata.len() as usize <= DIFF_MAX_INPUT_BYTES,
+        // If the size cannot be determined, do not read the file: the fallback
+        // (no diff) is strictly safer than an unbounded allocation.
+        Err(_) => false,
+    }
+}
+
+/// Whether in-memory content is small enough to diff.
+pub fn content_within_diff_size_limit(content: &str) -> bool {
+    content.len() <= DIFF_MAX_INPUT_BYTES
+}
+
 const TOUCH_PREVIEW_MAX_LINES: usize = 6;
 const TOUCH_PREVIEW_MAX_BYTES: usize = 240;
 
@@ -225,5 +254,50 @@ mod tests {
             .join("\n");
         let preview = build_file_touch_preview(&long).unwrap();
         assert!(preview.contains("…"));
+    }
+}
+
+#[cfg(test)]
+mod diff_size_limit_tests {
+    use super::*;
+
+    #[test]
+    fn content_within_limit_accepts_small_and_rejects_large() {
+        assert!(content_within_diff_size_limit("small"));
+        let at_limit = "a".repeat(DIFF_MAX_INPUT_BYTES);
+        assert!(content_within_diff_size_limit(&at_limit));
+        let over_limit = "a".repeat(DIFF_MAX_INPUT_BYTES + 1);
+        assert!(!content_within_diff_size_limit(&over_limit));
+    }
+
+    /// The point of the cap: a file past the limit must be rejected on metadata
+    /// alone, so its content is never read into memory.
+    #[tokio::test]
+    async fn oversized_file_is_rejected_without_reading() {
+        let dir = std::env::temp_dir().join("ac_diff_limit_test");
+        tokio::fs::create_dir_all(&dir).await.expect("create dir");
+        let path = dir.join("big.txt");
+        tokio::fs::write(&path, vec![b'x'; DIFF_MAX_INPUT_BYTES + 1])
+            .await
+            .expect("write file");
+
+        assert!(!file_within_diff_size_limit(&path).await);
+
+        // A file that does not exist must also fail closed rather than reading.
+        assert!(!file_within_diff_size_limit(&dir.join("missing.txt")).await);
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn small_file_is_within_limit() {
+        let dir = std::env::temp_dir().join("ac_diff_limit_ok_test");
+        tokio::fs::create_dir_all(&dir).await.expect("create dir");
+        let path = dir.join("small.txt");
+        tokio::fs::write(&path, b"hello").await.expect("write file");
+
+        assert!(file_within_diff_size_limit(&path).await);
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
     }
 }

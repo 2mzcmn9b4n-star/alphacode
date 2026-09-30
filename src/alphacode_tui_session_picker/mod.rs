@@ -205,16 +205,30 @@ pub fn session_is_pi(
     if source == SessionSource::Pi {
         return true;
     }
+    // Namespaced ids are the real on-disk form (`vendor/pi-fast`), so the bare
+    // prefix has to be tested against the last `/`-separated segment as well as
+    // the whole string. Without that, an Alphacode session whose model id came
+    // from a namespaced provider was not recognised as a Pi session and was
+    // filtered out of the Pi picker.
+    let segment_matches = |value: &str| {
+        value
+            .rsplit('/')
+            .next()
+            .is_some_and(|segment| segment == "pi" || segment.starts_with("pi-"))
+    };
     let provider_matches = provider_key
         .map(|key| {
             let key = key.to_ascii_lowercase();
-            key == "pi" || key.starts_with("pi-")
+            key == "pi" || key.starts_with("pi-") || segment_matches(&key)
         })
         .unwrap_or(false);
     let model_matches = model
         .map(|model| {
             let model = model.to_ascii_lowercase();
-            model == "pi" || model.starts_with("pi-") || model.starts_with("pi/")
+            model == "pi"
+                || model.starts_with("pi-")
+                || model.starts_with("pi/")
+                || segment_matches(&model)
         })
         .unwrap_or(false);
     provider_matches || model_matches

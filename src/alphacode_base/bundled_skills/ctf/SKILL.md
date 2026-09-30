@@ -248,3 +248,326 @@ challenge_name/
 ```
 TRIAGE (solve-challenge) → CLASSIFY → LOAD CATEGORY + TECHNIQUE REFS → ANALYZE → EXPLOIT → VERIFY → SUBMIT (writeup) → LEARN
 ```
+
+## Automated CTF Solver Pipeline
+
+When facing multiple challenges, use this parallel solving approach:
+
+```bash
+# Step 1: Bulk triage all challenges (< 30s)
+for dir in */; do
+  echo "=== $dir ==="
+  file "$dir"/* 2>/dev/null | head -5
+  strings "$dir"/* 2>/dev/null | grep -iE 'flag\{|ctf\{' | head -3
+  ls -la "$dir"
+done
+
+# Step 2: Categorize and prioritize
+# Sort by: file size (smaller = easier), challenge points, solve count
+# Quick wins first: < 1KB files, obvious file types, known patterns
+
+# Step 3: Parallel solving by category
+# Web challenges: curl + ffuf + sqlmap in parallel
+# Crypto: python3 with custom solver scripts
+# Pwn: pwntools exploit scripts
+# Forensics: binwalk + steghide + exiftool in parallel
+# Rev: strings + objdump + ghidra headless
+
+# Step 4: Auto-flag extraction
+find . -type f -exec grep -lE '(flag|ctf|htb|pico)\{[^}]+\}' {} \;
+find . -type f -exec sh -c 'strings "$1" | grep -qE "(flag|ctf)\{" && echo "$1"' _ {} \;
+
+# Step 5: Auto-submit via CTFd API
+# curl -s -X POST -H "Authorization: Token $CTF_TOKEN" -d "flag=$FLAG" "$CTF_URL/api/v1/challenges/attempt"
+```
+
+## Advanced CTF Techniques (2025-2026)
+
+### Web Challenge Fast-Path
+```bash
+# One-shot web recon + exploit
+URL=$1
+# Parallel: headers, robots, common paths, parameter discovery
+(curl -sI $URL 2>/dev/null | grep -iE 'server|x-powered|cookie') &
+(curl -s $URL/robots.txt 2>/dev/null) &
+(curl -s $URL/api/ 2>/dev/null | head -20) &
+(arjun -u $URL --stable 2>/dev/null) &
+wait
+# Then: SQLi test, XSS test, auth bypass based on findings
+```
+
+### Crypto Challenge Fast-Path
+```bash
+# Auto-detect crypto type and solve
+FILE=$1
+# Check for common patterns
+xxd $FILE | head -5  # Look for patterns
+# RSA: check for small exponents, common moduli, Wiener's attack
+# AES: check for ECB mode, weak keys, IV reuse
+# ECC: check for invalid curve, small subgroup, nonce reuse
+# PRNG: check for MT19937, LCG, weak seeds
+python3 -c "
+import sys
+data = open('$FILE', 'rb').read()
+# Entropy analysis
+from collections import Counter
+import math
+counts = Counter(data)
+entropy = -sum(c/len(data) * math.log2(c/len(data)) for c in counts.values())
+print(f'Entropy: {entropy:.2f} bits/byte')
+if entropy < 2: print('Likely XOR or substitution cipher')
+elif entropy < 5: print('Likely compressed or encoded')
+else: print('Likely encrypted or random')
+"
+```
+
+### Binary Exploitation Fast-Path
+```bash
+# Auto-analyze and generate exploit template
+FILE=$1
+# Step 1: Protection analysis
+checksec --file=$FILE 2>/dev/null
+# Step 2: Vulnerability identification
+strings $FILE | grep -iE 'flag|password|key|admin|system|pwn'
+objdump -d $FILE | grep -E '<(main|vuln|win|gets|puts|read|scanf)@plt>'
+# Step 3: Generate exploit based on protections
+# No canary + no PIE + no NX -> ret2win
+# No canary + no PIE + NX -> ret2libc
+# Canary + PIE -> format string leak + ret2libc
+# Full protections -> SROP or ret2dlresolve
+```
+
+### Forensics Fast-Path
+```bash
+# Auto-extract and analyze
+FILE=$1
+# Step 1: File identification
+file $FILE
+# Step 2: Embedded file extraction
+binwalk -e $FILE 2>/dev/null
+# Step 3: Steganography detection
+exiftool $FILE 2>/dev/null | grep -iE 'comment|description|flag'
+zsteg $FILE 2>/dev/null | head -10
+steghide extract -sf $FILE -f 2>/dev/null
+# Step 4: PCAP analysis
+tshark -r $FILE -q -z io,phs 2>/dev/null
+tshark -r $FILE --export-objects http,/tmp/http_exp 2>/dev/null
+# Step 5: Memory forensics
+volatility -f $FILE imageinfo 2>/dev/null
+volatility -f $FILE pslist 2>/dev/null
+```
+
+## CTF Platform Integration
+
+### CTFd API Client
+```python
+# ctfd_client.py - Full CTFd API integration
+import requests
+import json
+
+class CTFdClient:
+    def __init__(self, url, token):
+        self.url = url.rstrip('/')
+        self.headers = {'Authorization': f'Token {token}', 'Content-Type': 'application/json'}
+    
+    def get_challenges(self):
+        r = requests.get(f'{self.url}/api/v1/challenges', headers=self.headers)
+        return r.json().get('data', [])
+    
+    def get_challenge(self, challenge_id):
+        r = requests.get(f'{self.url}/api/v1/challenges/{challenge_id}', headers=self.headers)
+        return r.json().get('data', {})
+    
+    def get_files(self, challenge_id):
+        r = requests.get(f'{self.url}/api/v1/challenges/{challenge_id}/files', headers=self.headers)
+        return r.json().get('data', [])
+    
+    def submit_flag(self, challenge_id, flag):
+        r = requests.post(f'{self.url}/api/v1/challenges/attempt', 
+                         headers=self.headers,
+                         json={'challenge_id': challenge_id, 'flag': flag})
+        return r.json()
+    
+    def get_scoreboard(self):
+        r = requests.get(f'{self.url}/api/v1/scoreboard', headers=self.headers)
+        return r.json().get('data', [])
+
+# Usage:
+# client = CTFdClient('https://ctf.example.com', 'your_token')
+# challenges = client.get_challenges()
+# for c in challenges:
+#     print(f"{c['id']}: {c['name']} ({c['category']}) - {c['value']} pts")
+```
+
+### Auto-Submit Script
+```bash
+#!/bin/bash
+# auto_submit.sh - Auto-submit flags to CTFd
+CTF_URL="https://ctf.example.com"
+CTF_TOKEN="your_token"
+CHALLENGE_ID=$1
+FLAG=$2
+
+if [ -z "$CHALLENGE_ID" ] || [ -z "$FLAG" ]; then
+  echo "Usage: $0 <challenge_id> <flag>"
+  exit 1
+fi
+
+# Validate flag format
+if ! echo "$FLAG" | grep -qE '^[a-zA-Z0-9_{}]+$'; then
+  echo "Invalid flag format: $FLAG"
+  exit 1
+fi
+
+# Submit
+RESPONSE=$(curl -s -X POST \
+  -H "Authorization: Token $CTF_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"challenge_id\": $CHALLENGE_ID, \"flag\": \"$FLAG\"}" \
+  "$CTF_URL/api/v1/challenges/attempt")
+
+# Check result
+if echo "$RESPONSE" | grep -q '"status": "correct"'; then
+  echo "[+] Correct! Flag accepted: $FLAG"
+elif echo "$RESPONSE" | grep -q '"status": "incorrect"'; then
+  echo "[-] Incorrect flag: $FLAG"
+elif echo "$RESPONSE" | grep -q '"status": "already_solved"'; then
+  echo "[*] Already solved: $FLAG"
+else
+  echo "[?] Unknown response: $RESPONSE"
+fi
+```
+
+## Parallel Challenge Solving
+
+```bash
+# Solve multiple challenges in parallel
+solve_challenge() {
+  local dir=$1
+  local category=$2
+  cd "$dir"
+  
+  case $category in
+    web)
+      # Web solving pipeline
+      curl -s http://challenge-url/ > index.html
+      ffuf -u http://challenge-url/FUZZ -w wordlist -mc 200 -s &
+      sqlmap -u "http://challenge-url/?id=1" --batch &
+      wait
+      ;;
+    crypto)
+      # Crypto solving pipeline
+      python3 solve.py &
+      python3 -c "from Crypto.Util.number import *; ..." &
+      wait
+      ;;
+    pwn)
+      # Pwn solving pipeline
+      python3 exploit.py &
+      checksec --file=binary &
+      ROPgadget --binary binary | grep "pop rdi" &
+      wait
+      ;;
+    forensics)
+      # Forensics solving pipeline
+      binwalk -e file &
+      steghide extract -sf file -f &
+      exiftool file &
+      wait
+      ;;
+  esac
+  
+  cd ..
+}
+
+# Export and run in parallel
+export -f solve_challenge
+ls -d */ | parallel -j4 'solve_challenge {} $(detect_category {})'
+```
+
+## Machine Learning for CTF
+
+### Challenge Classification
+```python
+# classify_challenge.py - ML-based challenge classification
+import os
+import json
+from pathlib import Path
+
+def classify_challenge(directory):
+    """Classify challenge based on file types and content"""
+    files = list(Path(directory).iterdir())
+    
+    # File type signals
+    signals = {
+        'web': 0, 'pwn': 0, 'crypto': 0, 
+        'forensics': 0, 'rev': 0, 'misc': 0
+    }
+    
+    for f in files:
+        ext = f.suffix.lower()
+        name = f.name.lower()
+        
+        # Web signals
+        if ext in ['.html', '.php', '.js', '.sql']:
+            signals['web'] += 2
+        if 'http' in name or 'web' in name:
+            signals['web'] += 1
+        
+        # Pwn signals
+        if ext in ['.elf', '.exe', '.so', '.dll']:
+            signals['pwn'] += 2
+        if 'pwn' in name or 'overflow' in name:
+            signals['pwn'] += 1
+        
+        # Crypto signals
+        if ext in ['.sage', '.py'] and 'crypto' in name:
+            signals['crypto'] += 2
+        if 'rsa' in name or 'aes' in name or 'encrypt' in name:
+            signals['crypto'] += 1
+        
+        # Forensics signals
+        if ext in ['.pcap', '.pcapng', '.raw', '.dd', '.E01']:
+            signals['forensics'] += 3
+        if 'forensics' in name or 'steg' in name:
+            signals['forensics'] += 1
+        
+        # Rev signals
+        if ext in ['.apk', '.wasm', '.pyc']:
+            signals['rev'] += 2
+        if 'rev' in name or 'reverse' in name:
+            signals['rev'] += 1
+    
+    # Return category with highest score
+    return max(signals, key=signals.get)
+
+# Usage
+# category = classify_challenge('./challenge_dir')
+# print(f"Detected category: {category}")
+```
+
+## Knowledge Base Integration
+
+### Pattern Memory
+```bash
+# Store solved patterns for future reference
+PATTERN_FILE="~/.alphacode/ctf_patterns.json"
+
+store_pattern() {
+  local category=$1
+  local challenge=$2
+  local technique=$3
+  local flag=$4
+  
+  # Append to pattern database
+  jq --arg cat "$category" --arg chal "$challenge" --arg tech "$technique" --arg flag "$flag" \
+    '.patterns += [{"category": $cat, "challenge": $chal, "technique": $tech, "flag": $flag, "date": now | todate}]' \
+    "$PATTERN_FILE" > "${PATTERN_FILE}.tmp" && mv "${PATTERN_FILE}.tmp" "$PATTERN_FILE"
+}
+
+# Retrieve similar patterns
+get_similar_patterns() {
+  local category=$1
+  jq --arg cat "$category" '.patterns[] | select(.category == $cat) | .technique' "$PATTERN_FILE"
+}
+```

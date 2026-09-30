@@ -449,6 +449,22 @@ A healthy setup should report that the browser bridge is available and respondin
 
 ---
 
+# 🔐 Signing in with a provider
+
+Most providers work from an environment variable (`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, and so on). Run `/login` inside AlphaCode for the
+interactive flows.
+
+**OpenAI (Codex OAuth)** is the exception: it needs a local callback listener, so
+AlphaCode serves the redirect on `http://localhost:1455/auth/callback` while you
+sign in. Make sure port `1455` on localhost is free, and that nothing else is
+listening on it, before you start. If login fails with a timeout, something is
+already bound to that port — stop it and run `/login` again.
+
+See [OAUTH.md](OAUTH.md) for the full set of provider flows and troubleshooting.
+
+---
+
 # ⚡ 3. Give AlphaCode a task
 
 You don't need special syntax.

@@ -206,20 +206,19 @@ fn reset_read_only_counter(session: &str) {
 /// Get a warning message if the agent is in a verification loop.
 fn get_verification_loop_warning(session: &str) -> Option<String> {
     let mut counter = READ_ONLY_COUNTER.lock().unwrap();
-    if let Some(map) = counter.as_mut() {
-        if let Some(count) = map.get(session) {
-            if *count >= MAX_READ_ONLY_ACTIONS {
-                return Some(format!(
-                    "WARNING: You have made {} consecutive read-only actions without any state-changing results. \
-                     You may be stuck in a verification loop. \
-                     Try a different approach: \
-                     1) If you're trying to verify something, make a state-changing action instead. \
-                     2) If you're exploring, try to find something actionable. \
-                     3) If you're stuck, report your findings and move on.",
-                    count
-                ));
-            }
-        }
+    if let Some(map) = counter.as_mut()
+        && let Some(count) = map.get(session)
+        && *count >= MAX_READ_ONLY_ACTIONS
+    {
+        return Some(format!(
+            "WARNING: You have made {} consecutive read-only actions without any state-changing results. \
+             You may be stuck in a verification loop. \
+             Try a different approach: \
+             1) If you're trying to verify something, make a state-changing action instead. \
+             2) If you're exploring, try to find something actionable. \
+             3) If you're stuck, report your findings and move on.",
+            count
+        ));
     }
     None
 }
@@ -636,7 +635,7 @@ impl Tool for BrowserTool {
                     "scroll", "upload", "press", "get_cookies", "set_cookies", "delete_cookie",
                     "list_cookies", "provider_command"
                 ],
-                "description": "Action. Check 'status' once first. 'open' takes url, opens a new background tab, and returns no page body - follow with 'snapshot'. 'wait': timeout_ms alone is a plain delay; selector/text/position waits on a target. 'press' sends a real key; 'type' with submit=true also submits. 'upload' takes a local file path. Cookies: get_cookies/set_cookies/delete_cookie; list_cookies is legacy JS-only. Use 'domain' param with get_cookies to filter by domain (e.g., 'domain': 'paypal.com')."
+                "description": "Action. Check 'status' first. 'open' takes url, opens a background tab and returns no page body - follow with 'snapshot'. 'wait' with only timeout_ms is a plain delay. 'press' sends a real key; 'type' with submit=true submits. 'upload' takes a local file path. Aliases: navigate/goto=open, evaluate=eval, set_files=upload."
             }),
         );
         properties.insert(
@@ -819,10 +818,10 @@ impl Tool for BrowserTool {
 
         // Verification loop detection: track consecutive read-only actions
         let session = ctx.session_id.as_str();
-        let loop_warning = if is_state_changing_action(&action) {
+        let loop_warning = if is_state_changing_action(action) {
             reset_read_only_counter(session);
             None
-        } else if is_read_only_action(&action) {
+        } else if is_read_only_action(action) {
             let should_warn = increment_read_only_counter(session);
             if should_warn {
                 get_verification_loop_warning(session)
@@ -870,13 +869,33 @@ fn invalid_input_error(input: &Value, error: &serde_json::Error) -> anyhow::Erro
     )
 }
 
+/// Map action spellings models actually emit onto the canonical ones.
+///
 /// `navigate` was documented as an alias for `open` in the description but
-/// was never actually accepted anywhere in the dispatch code — it would
-/// have fallen through to the "Unsupported browser action" bail. Fixed
-/// here so the documented alias actually works.
+/// was never accepted anywhere in the dispatch code — it would have fallen
+/// through to the "Unsupported browser action" bail.
+///
+/// The rest are the Playwright / Puppeteer / Selenium names. A model
+/// uploading a file writes `set_files` or `set_input_files` (Playwright's
+/// `setInputFiles`) and was told the action did not exist, even though
+/// `upload` does exactly that. Accepting the names outright is better than
+/// rejecting a correct intent over vocabulary.
 fn normalize_action(action: &str) -> &str {
     match action {
-        "navigate" => "open",
+        "navigate" | "goto" | "visit" => "open",
+        "back" => "go_back",
+        "forward" => "go_forward",
+        "close" => "close_tab",
+        "content" | "text" | "html" => "get_content",
+        "evaluate" | "js" | "javascript" | "run_script" => "eval",
+        "press_key" | "key" | "keypress" => "press",
+        "fill" => "fill_form",
+        "set_files" | "setFiles" | "set_input_files" | "setInputFiles" | "upload_file"
+        | "upload_files" | "uploadFile" | "attach_file" | "file_upload" => "upload",
+        "frame_list" => "list_frames",
+        "tab_list" => "list_tabs",
+        "new_browser_tab" => "new_tab",
+        "close_browser_tab" => "close_tab",
         other => other,
     }
 }
@@ -1441,13 +1460,65 @@ fn wait_bridge_action(input: &BrowserInput) -> &'static str {
 }
 
 fn unsupported_action_message(action: &str) -> String {
-    format!(
-        "Unsupported browser action: '{action}'. Valid actions: status, setup, list_tabs, new_tab, \
-         select_tab, get_active_tab, list_frames, open (alias: navigate), reload, go_back, \
-         go_forward, close_tab, snapshot, get_content, interactables, click, hover, type, \
-         fill_form, select, drag_and_drop, wait, screenshot, eval, scroll, upload, press, \
-         get_cookies, set_cookies, delete_cookie, list_cookies, provider_command."
-    )
+    // A bare "valid actions:" dump forces the model to diff the whole list by
+    // hand. Naming the near-misses gets the intended action accepted on the
+    // next turn instead of another wrong guess.
+    let mut message = format!("Unsupported browser action: '{action}'.");
+    let aliases: &[(&str, &str)] = &[
+        ("navigate", "open"),
+        ("goto", "open"),
+        ("visit", "open"),
+        ("evaluate", "eval"),
+        ("js", "eval"),
+        ("javascript", "eval"),
+        ("run_script", "eval"),
+        ("back", "go_back"),
+        ("forward", "go_forward"),
+        ("close", "close_tab"),
+        ("text", "get_content"),
+        ("content", "get_content"),
+        ("set_files", "upload"),
+        ("set_input_files", "upload"),
+        ("upload_file", "upload"),
+        ("upload_files", "upload"),
+        ("setFiles", "upload"),
+        ("attach_file", "upload"),
+        ("press_key", "press"),
+        ("key", "press"),
+        ("fill", "fill_form"),
+        ("frame_list", "list_frames"),
+        ("tab_list", "list_tabs"),
+    ];
+    let suggestions: Vec<String> = aliases
+        .iter()
+        .filter(|(alias, _)| alias.eq_ignore_ascii_case(action))
+        .map(|(_, canonical)| format!("'{canonical}'"))
+        .chain(
+            super::Registry::closest_tool_names(action, KNOWN_ACTIONS)
+                .into_iter()
+                .map(|name| format!("'{name}'")),
+        )
+        .collect();
+    let suggestions = dedupe_preserving_order(suggestions);
+    if !suggestions.is_empty() {
+        message.push_str(&format!(" Did you mean {}?", suggestions.join(", ")));
+    }
+    message.push_str(
+        " Valid actions: status, setup, list_tabs, new_tab, select_tab, get_active_tab, \
+         list_frames, open (alias: navigate), reload, go_back, go_forward, close_tab, snapshot, \
+         get_content, interactables, click, hover, type, fill_form, select, drag_and_drop, wait, \
+         screenshot, eval, scroll, upload (aliases: set_files, set_input_files), press, \
+         get_cookies, set_cookies, delete_cookie, list_cookies, provider_command.",
+    );
+    message
+}
+
+fn dedupe_preserving_order(items: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| seen.insert(item.clone()))
+        .collect()
 }
 
 fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, String)> {
@@ -2228,9 +2299,33 @@ async fn firefox_run_bridge_command(
         }
     }
 
-    let child = command
-        .spawn()
-        .with_context(|| format!("Failed to run browser bridge action '{}'.", action))?;
+    let child = command.spawn().map_err(|error| {
+        // This used to report only "Failed to run browser bridge action 'X'."
+        // — which names the action the caller asked for, not the thing that
+        // actually broke, so it reads like the action is unsupported when the
+        // real fault is a spawn that never happened. Name the cause and the
+        // most common local reasons for it.
+        let mut message = format!(
+            "Browser bridge action '{action}' could not start: {error}."
+        );
+        let detail = match error.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                " The bridge binary exists but is not executable, or is blocked by antivirus / Windows Defender."
+            }
+            std::io::ErrorKind::NotFound => {
+                " The bridge binary disappeared between the existence check and the spawn — an install or antivirus quarantine raced this call."
+            }
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::ResourceBusy => {
+                " Another process holds the bridge binary open."
+            }
+            _ => "",
+        };
+        message.push_str(detail);
+        message.push_str(
+            " Run action='status' to check the bridge, then action='setup' to reinstall it.",
+        );
+        anyhow::anyhow!(message)
+    })?;
     let output = match tokio::time::timeout(BRIDGE_COMMAND_TIMEOUT, child.wait_with_output()).await
     {
         Ok(Ok(output)) => output,
@@ -2250,12 +2345,14 @@ async fn firefox_run_bridge_command(
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
 
     if !output.status.success() {
-        let details = if stderr.is_empty() {
-            stdout
-        } else if stdout.is_empty() {
-            stderr
-        } else {
-            format!("{}\n{}", stderr, stdout)
+        // Previously the empty case collapsed to `stdout` (i.e. ""), so a
+        // bridge that died without writing anything reported
+        // "failed: " with no cause at all. Name the exit status instead.
+        let details = match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => format!("exit {} with no diagnostic output", output.status),
+            (false, true) => stdout,
+            (true, false) => stderr,
+            (false, false) => format!("{stderr}\n{stdout}"),
         };
         if details.contains("Unknown action:") {
             anyhow::bail!(
@@ -3143,6 +3240,79 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("Valid actions"), "{message}");
+    }
+
+    /// Playwright spells file upload `setInputFiles`; Puppeteer/Selenium users
+    /// write `set_files` / `setFiles`. All three used to be rejected outright
+    /// even though `upload` does exactly what they mean.
+    #[test]
+    fn file_upload_aliases_normalize_to_upload() {
+        for alias in [
+            "set_files",
+            "setFiles",
+            "set_input_files",
+            "setInputFiles",
+            "upload_file",
+            "upload_files",
+            "uploadFile",
+            "attach_file",
+            "file_upload",
+        ] {
+            assert_eq!(normalize_action(alias), "upload", "alias {alias}");
+            assert!(
+                KNOWN_ACTIONS.contains(&normalize_action(alias)),
+                "{alias} must normalize to a dispatchable action"
+            );
+        }
+    }
+
+    /// A normalized alias has to work end to end, not just reach the dispatch
+    /// table: it must still build a real `uploadFile` bridge request.
+    #[test]
+    fn upload_alias_reaches_the_upload_file_bridge_action() {
+        let input = browser_input(json!({"action": "set_files", "path": "payload.php"}));
+        let (bridge_action, _params, _) =
+            bridge_request(normalize_action("set_files"), &input).expect("bridge request");
+        assert_eq!(bridge_action, "uploadFile");
+    }
+
+    #[test]
+    fn other_playwright_style_aliases_normalize() {
+        assert_eq!(normalize_action("evaluate"), "eval");
+        assert_eq!(normalize_action("js"), "eval");
+        assert_eq!(normalize_action("goto"), "open");
+        assert_eq!(normalize_action("back"), "go_back");
+        assert_eq!(normalize_action("forward"), "go_forward");
+        assert_eq!(normalize_action("close"), "close_tab");
+        assert_eq!(normalize_action("text"), "get_content");
+        assert_eq!(normalize_action("press_key"), "press");
+        // The canonical names must pass through untouched.
+        for canonical in KNOWN_ACTIONS {
+            assert_eq!(
+                normalize_action(canonical),
+                *canonical,
+                "canonical action {canonical} must not be rewritten"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_action_suggests_the_canonical_name() {
+        // An exact alias match.
+        let via_alias = unsupported_action_message("navigate");
+        assert!(via_alias.contains("Did you mean"), "{via_alias}");
+        assert!(via_alias.contains("'open'"), "{via_alias}");
+
+        // A near-miss that only the edit-distance heuristic can catch.
+        let via_fuzzy = unsupported_action_message("uploa");
+        assert!(via_fuzzy.contains("Did you mean"), "{via_fuzzy}");
+        assert!(via_fuzzy.contains("'upload'"), "{via_fuzzy}");
+
+        // A name with no near match still gets the full list, never a bogus
+        // suggestion and never a truncated message.
+        let unrelated = unsupported_action_message("zzzzzz");
+        assert!(!unrelated.contains("Did you mean"), "{unrelated}");
+        assert!(unrelated.contains("Valid actions"), "{unrelated}");
     }
 
     #[test]

@@ -38,6 +38,7 @@ use super::comm_sync::{
     CommResyncPlanContext, handle_comm_plan_status, handle_comm_read_context,
     handle_comm_resync_plan, handle_comm_status, handle_comm_summary,
 };
+use super::frame_reader::{FrameRead, MAX_CLIENT_FRAME_BYTES, read_frame_line};
 use super::provider_control::{
     handle_cycle_model, handle_notify_auth_changed, handle_refresh_models,
     handle_set_compaction_mode, handle_set_model, handle_set_premium_mode,
@@ -69,7 +70,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
@@ -373,8 +374,10 @@ pub(super) async fn handle_client(
 
     let initial_request = loop {
         line.clear();
-        let n = match reader.read_line(&mut line).await {
-            Ok(n) => n,
+        // Bounded read: an unterminated frame must not be able to grow the
+        // buffer without limit and OOM the server.
+        let frame = match read_frame_line(&mut reader, MAX_CLIENT_FRAME_BYTES).await {
+            Ok(frame) => frame,
             Err(error) => {
                 crate::logging::error(&format!(
                     "Client read error before initialization: {}",
@@ -382,6 +385,20 @@ pub(super) async fn handle_client(
                 ));
                 return Ok(());
             }
+        };
+        let n = match frame {
+            FrameRead::Line(line_value) => {
+                line.push_str(&line_value);
+                line_value.len()
+            }
+            FrameRead::TooLarge { limit } => {
+                crate::logging::error(&format!(
+                    "Client sent an oversized initialization frame (limit {} bytes); closing connection",
+                    limit
+                ));
+                return Ok(());
+            }
+            FrameRead::Eof => 0,
         };
         if n == 0 {
             return Ok(());
@@ -685,9 +702,23 @@ pub(super) async fn handle_client(
             biased;
             // Prioritize direct client I/O so subscribe/ping/message requests do not get
             // starved behind noisy background bus traffic.
-            n = reader.read_line(&mut line) => {
-                let n = match n {
-                    Ok(n) => n,
+            frame = read_frame_line(&mut reader, MAX_CLIENT_FRAME_BYTES) => {
+                let n = match frame {
+                    Ok(FrameRead::Line(line_value)) => {
+                        line.push_str(&line_value);
+                        line_value.len()
+                    }
+                    // The oversized frame was already drained, so the stream is
+                    // back on a frame boundary. Reject this one request and keep
+                    // serving the session rather than dropping the connection.
+                    Ok(FrameRead::TooLarge { limit }) => {
+                        crate::logging::error(&format!(
+                            "Client sent an oversized frame (limit {} bytes); rejecting request",
+                            limit
+                        ));
+                        continue;
+                    }
+                    Ok(FrameRead::Eof) => 0,
                     Err(e) => {
                         crate::logging::error(&format!("Client read error: {}", e));
                         break;

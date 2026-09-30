@@ -19,8 +19,21 @@ impl EditTool {
 struct EditInput {
     #[serde(default)]
     intent: Option<String>,
+    #[serde(
+        alias = "path",
+        alias = "file",
+        alias = "filename",
+        alias = "file_name"
+    )]
     file_path: String,
+    #[serde(alias = "old", alias = "old_str", alias = "search", alias = "find")]
     old_string: String,
+    #[serde(
+        alias = "new",
+        alias = "new_str",
+        alias = "replacement",
+        alias = "replace"
+    )]
     new_string: String,
     #[serde(default)]
     replace_all: bool,
@@ -242,7 +255,7 @@ fn try_flexible_match(content: &str, old_string: &str, file_path: &str) -> Resul
                 .unwrap_or(0)
                 + 1;
             let snippet = if similar.len() > 80 {
-                &similar[..80]
+                &similar[..similar.floor_char_boundary(80)]
             } else {
                 similar
             };

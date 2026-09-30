@@ -680,6 +680,13 @@ pub(crate) fn extract_retry_after_secs(error: &str) -> Option<u64> {
 /// else transient is an upstream blip that clears in seconds.
 pub(crate) fn classify_rotation_trigger(error: &str) -> super::free_pool_rotation::RotationTrigger {
     let lower = error.to_ascii_lowercase();
+    // Routing 404 is checked first and is deliberately narrow. A generic
+    // `contains("404")` would also catch a 404 from a proxy or a bad base URL,
+    // which are not per-model facts and must keep the short transient window —
+    // the model is fine, the request is wrong.
+    if is_unroutable_model_error(&lower) {
+        return super::free_pool_rotation::RotationTrigger::Unroutable;
+    }
     let rate_limited = contains_429_with_rate_limit(&lower)
         || lower.contains("too many requests")
         || lower.contains("rate limit")
@@ -691,6 +698,21 @@ pub(crate) fn classify_rotation_trigger(error: &str) -> super::free_pool_rotatio
     } else {
         super::free_pool_rotation::RotationTrigger::Transient
     }
+}
+
+/// Does this error mean the gateway has no route for the model id itself?
+///
+/// Requires the routing vocabulary, not just a 404 status, because a 404 can
+/// equally mean a wrong base URL — and quarantining the model for that would
+/// hide a configuration bug behind a model that is actually fine.
+fn is_unroutable_model_error(lower: &str) -> bool {
+    if !lower.contains("404") {
+        return false;
+    }
+    lower.contains("no endpoints found")
+        || lower.contains("no provider or endpoint")
+        || lower.contains("no endpoint found")
+        || lower.contains("every candidate endpoint was removed")
 }
 
 /// Compute a retry delay for a transient provider error, preferring the

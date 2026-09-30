@@ -1052,6 +1052,10 @@ mod cache_prefix_invariant_tests {
             schema["properties"]["nested_union"].get("anyOf").is_some(),
             "nested combinators remain supported and should not be flattened"
         );
+        // Flattening `allOf` merges the branch's `required` list into the
+        // parent, so `intent` is required here because the fixture's `allOf`
+        // branch declares it required — not because the formatter adds it.
+        // Removing top-level combinators must not lose that constraint.
         assert_eq!(schema["required"], json!(["action", "intent"]));
     }
 

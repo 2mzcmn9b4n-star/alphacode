@@ -22,10 +22,41 @@ pub struct KnowledgeEntry {
     pub tags: Vec<String>,
     pub source: Option<String>,
     pub confidence: f64,
+    // Enhanced knowledge fields
+    pub cve_references: Vec<String>,
+    pub owasp_category: Option<String>,
+    pub cvss_score: Option<f64>,
+    pub cvss_vector: Option<String>,
+    pub affected_versions: Vec<String>,
+    pub patched_versions: Vec<String>,
+    pub exploit_complexity: Option<String>,
+    pub exploit_availability: Option<String>,
+    pub remediation_steps: Vec<String>,
+    pub detection_methods: Vec<String>,
+    pub false_positive_indicators: Vec<String>,
+    pub related_cwes: Vec<String>,
+    pub attack_chain_position: Option<String>,
+    pub prerequisites: Vec<String>,
+    pub postconditions: Vec<String>,
+    pub indicators_of_compromise: Vec<String>,
+    pub mitigation_strategies: Vec<String>,
+    pub testing_approach: String,
+    pub automation_potential: f64,
+    pub false_positive_rate: f64,
+    pub true_positive_rate: f64,
+    pub average_time_to_exploit: Option<String>,
+    pub skill_required: Option<String>,
+    pub tools_required: Vec<String>,
+    pub references: Vec<String>,
+    pub notes: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub version: u32,
 }
 
 impl KnowledgeEntry {
     pub fn new(id: String, title: String, vuln_class: String, root_cause: String) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
         Self {
             id,
             title,
@@ -43,6 +74,36 @@ impl KnowledgeEntry {
             tags: Vec::new(),
             source: None,
             confidence: 0.5,
+            // Enhanced knowledge fields
+            cve_references: Vec::new(),
+            owasp_category: None,
+            cvss_score: None,
+            cvss_vector: None,
+            affected_versions: Vec::new(),
+            patched_versions: Vec::new(),
+            exploit_complexity: None,
+            exploit_availability: None,
+            remediation_steps: Vec::new(),
+            detection_methods: Vec::new(),
+            false_positive_indicators: Vec::new(),
+            related_cwes: Vec::new(),
+            attack_chain_position: None,
+            prerequisites: Vec::new(),
+            postconditions: Vec::new(),
+            indicators_of_compromise: Vec::new(),
+            mitigation_strategies: Vec::new(),
+            testing_approach: String::new(),
+            automation_potential: 0.5,
+            false_positive_rate: 0.0,
+            true_positive_rate: 0.0,
+            average_time_to_exploit: None,
+            skill_required: None,
+            tools_required: Vec::new(),
+            references: Vec::new(),
+            notes: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            version: 1,
         }
     }
 
@@ -54,6 +115,154 @@ impl KnowledgeEntry {
             .unwrap_or(true);
         let class_match = self.vulnerability_class.eq_ignore_ascii_case(vuln_class);
         tech_match && class_match
+    }
+
+    /// Update the knowledge entry with new information.
+    pub fn update(&mut self, other: &KnowledgeEntry) {
+        // Merge vectors without duplicates
+        for item in &other.attack_preconditions {
+            if !self.attack_preconditions.contains(item) {
+                self.attack_preconditions.push(item.clone());
+            }
+        }
+        for item in &other.bypass_techniques {
+            if !self.bypass_techniques.contains(item) {
+                self.bypass_techniques.push(item.clone());
+            }
+        }
+        for item in &other.edge_cases {
+            if !self.edge_cases.contains(item) {
+                self.edge_cases.push(item.clone());
+            }
+        }
+        for item in &other.tags {
+            if !self.tags.contains(item) {
+                self.tags.push(item.clone());
+            }
+        }
+        for item in &other.cve_references {
+            if !self.cve_references.contains(item) {
+                self.cve_references.push(item.clone());
+            }
+        }
+        for item in &other.remediation_steps {
+            if !self.remediation_steps.contains(item) {
+                self.remediation_steps.push(item.clone());
+            }
+        }
+        for item in &other.detection_methods {
+            if !self.detection_methods.contains(item) {
+                self.detection_methods.push(item.clone());
+            }
+        }
+        for item in &other.false_positive_indicators {
+            if !self.false_positive_indicators.contains(item) {
+                self.false_positive_indicators.push(item.clone());
+            }
+        }
+        for item in &other.mitigation_strategies {
+            if !self.mitigation_strategies.contains(item) {
+                self.mitigation_strategies.push(item.clone());
+            }
+        }
+        for item in &other.indicators_of_compromise {
+            if !self.indicators_of_compromise.contains(item) {
+                self.indicators_of_compromise.push(item.clone());
+            }
+        }
+        for item in &other.tools_required {
+            if !self.tools_required.contains(item) {
+                self.tools_required.push(item.clone());
+            }
+        }
+        for item in &other.references {
+            if !self.references.contains(item) {
+                self.references.push(item.clone());
+            }
+        }
+        for item in &other.notes {
+            if !self.notes.contains(item) {
+                self.notes.push(item.clone());
+            }
+        }
+
+        // Update scalar fields if they are more specific
+        if other.confidence > self.confidence {
+            self.confidence = other.confidence;
+        }
+        if other.cvss_score.is_some() {
+            self.cvss_score = other.cvss_score;
+        }
+        if other.cvss_vector.is_some() {
+            self.cvss_vector = other.cvss_vector.clone();
+        }
+        if other.owasp_category.is_some() {
+            self.owasp_category = other.owasp_category.clone();
+        }
+        if !other.impact.is_empty() {
+            self.impact = other.impact.clone();
+        }
+        if !other.defensive_lesson.is_empty() {
+            self.defensive_lesson = other.defensive_lesson.clone();
+        }
+        if !other.validation_method.is_empty() {
+            self.validation_method = other.validation_method.clone();
+        }
+        if !other.testing_approach.is_empty() {
+            self.testing_approach = other.testing_approach.clone();
+        }
+        if other.automation_potential > self.automation_potential {
+            self.automation_potential = other.automation_potential;
+        }
+
+        self.updated_at = chrono::Utc::now().to_rfc3339();
+        self.version += 1;
+    }
+
+    /// Calculate the overall quality score of this knowledge entry in
+    /// `0.0..=1.0`.
+    ///
+    /// The weights (0.3 + 0.2 + 0.3 + 0.2) sum to 1.0, so the score is their
+    /// weighted sum. This used to divide by a `factors` counter that counted
+    /// 3 or 4 regardless of what was present, capping the result at ~0.27 —
+    /// which made [`Self::is_high_quality`]'s `>= 0.7` test unsatisfiable, so
+    /// it returned `false` for every possible entry.
+    pub fn quality_score(&self) -> f64 {
+        let mut score = 0.0;
+
+        // Confidence contributes up to 0.3
+        score += self.confidence * 0.3;
+
+        // CVSS score contributes up to 0.2
+        if let Some(cvss) = self.cvss_score {
+            score += (cvss / 10.0).clamp(0.0, 1.0) * 0.2;
+        }
+
+        // Completeness of information contributes up to 0.3
+        let completeness = [
+            !self.attack_preconditions.is_empty(),
+            self.request_pattern.is_some(),
+            self.response_pattern.is_some(),
+            !self.bypass_techniques.is_empty(),
+            !self.remediation_steps.is_empty(),
+            !self.detection_methods.is_empty(),
+            !self.mitigation_strategies.is_empty(),
+        ]
+        .iter()
+        .filter(|&&x| x)
+        .count() as f64
+            / 7.0;
+        score += completeness * 0.3;
+
+        // Automation potential contributes up to 0.2
+        score += self.automation_potential * 0.2;
+
+        score.clamp(0.0, 1.0)
+    }
+
+    /// Check if this knowledge entry is high quality enough to be reused.
+    pub fn is_high_quality(&self) -> bool {
+        self.quality_score() >= 0.7 && self.confidence >= 0.8
     }
 }
 

@@ -74,6 +74,8 @@ pub use validation::{
 pub use verification_quality::{
     FalsePositiveDefense, NegativeHypothesis, VerificationQuality, VerificationState,
 };
+
+// Re-export web3 types (separate module with many types)
 pub use web3::{
     AssetFlowGraph, Capability, ContractInfo, EconomicOutcome, EvidenceTier, ExploitChain,
     ExploitStep, FlowEdge, GateVerdict, InvariantViolation, ProtocolModel, ProtocolState,

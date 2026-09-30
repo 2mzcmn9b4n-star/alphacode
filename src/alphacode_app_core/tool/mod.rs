@@ -17,6 +17,7 @@ mod conversation_search;
 mod corsy;
 mod crlfuzz;
 mod cron;
+mod ctf_tools;
 mod dalfox;
 mod debug_socket;
 pub mod desktop;
@@ -634,6 +635,57 @@ impl Registry {
             Self::insert_tool_timed(&mut m, &mut timings, "invalid", invalid::InvalidTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "todo", todo::TodoTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "bg", bg::BgTool::new);
+            // CTF-specific tools
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "pwntools",
+                ctf_tools::PwntoolsTool::new,
+            );
+            Self::insert_tool_timed(&mut m, &mut timings, "binwalk", ctf_tools::BinwalkTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "steghide",
+                ctf_tools::SteghideTool::new,
+            );
+            Self::insert_tool_timed(&mut m, &mut timings, "radare2", ctf_tools::Radare2Tool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "z3", ctf_tools::Z3Tool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "exiftool",
+                ctf_tools::ExiftoolTool::new,
+            );
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "volatility",
+                ctf_tools::VolatilityTool::new,
+            );
+            Self::insert_tool_timed(&mut m, &mut timings, "tshark", ctf_tools::TsharkTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "ghidra", ctf_tools::GhidraTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "angr", ctf_tools::AngrTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "hashcat", ctf_tools::HashcatTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "john", ctf_tools::JohnTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "flag_scanner",
+                ctf_tools::FlagScannerTool::new,
+            );
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "challenge_classifier",
+                ctf_tools::ChallengeClassifierTool::new,
+            );
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "ctf_auto_solver",
+                ctf_tools::CtfAutoSolverTool::new,
+            );
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,

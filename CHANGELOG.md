@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.66] - 2026-09-30
+
 ### Performance
 
 - **Streaming markdown no longer deep-clones the whole rendered line tree twice

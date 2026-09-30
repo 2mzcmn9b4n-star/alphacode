@@ -290,7 +290,7 @@ impl App {
 
         let result: anyhow::Result<String> = (|| match provider.target {
             LoginProviderTarget::Alphacode => {
-                return Err(anyhow::anyhow!("Alphacode logout handled above"));
+                Err(anyhow::anyhow!("Alphacode logout handled above"))
             }
             LoginProviderTarget::Claude => {
                 let removed = crate::alphacode_base::auth::claude::clear_accounts()?;

@@ -24,6 +24,12 @@ impl ReadTool {
 
 #[derive(Deserialize)]
 struct ReadInput {
+    #[serde(
+        alias = "path",
+        alias = "file",
+        alias = "filename",
+        alias = "file_name"
+    )]
     file_path: String,
     #[serde(
         default,

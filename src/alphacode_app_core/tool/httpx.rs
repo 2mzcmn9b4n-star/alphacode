@@ -133,6 +133,8 @@ impl Tool for HttpxTool {
         }
         let args = build_args(&params)?;
 
+        // `run_bounded` resolves the Go-installed build, which matters here:
+        // `httpx` collides with the Python HTTP client's CLI of the same name.
         let output = super::recon_common::run_bounded(
             "httpx",
             &args,
@@ -165,10 +167,15 @@ impl Tool for HttpxTool {
         if python_httpx.contains("[OPTIONS] URL") {
             return Err(anyhow::anyhow!(
                 "httpx failed: the `httpx` on PATH is the Python HTTP client, not \
-                 ProjectDiscovery's httpx. Install the right binary \
-                 (go install github.com/projectdiscovery/httpx/cmd/httpx@latest) \
-                 and make sure it comes first on PATH (`where httpx` on Windows, \
-                 `which -a httpx` elsewhere)."
+                 ProjectDiscovery's httpx, and no ProjectDiscovery build was found in \
+                 {}. Install the right binary with \
+                 `go install github.com/projectdiscovery/httpx/cmd/httpx@latest`, then \
+                 either make sure it precedes the Python one on PATH (`where httpx` on \
+                 Windows, `which -a httpx` elsewhere) or point GOBIN at the directory \
+                 holding it.",
+                crate::alphacode_app_core::bugbounty_install::go_bin_dir()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|| "the Go bin directory".to_string())
             ));
         }
 

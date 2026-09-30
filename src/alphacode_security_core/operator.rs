@@ -395,6 +395,7 @@ mod tests {
                 requires_auth: true,
                 discovered_by: "recon".into(),
                 noise_level: super::super::noise::NoiseLevel::Moderate,
+                ..Default::default()
             });
         let decision = SecurityOperator::decide(&ctx, OperatorAction::AnalyzeAndHypothesize);
         assert!(!decision.next_actions.is_empty());

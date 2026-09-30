@@ -30,6 +30,17 @@ pub enum SkillFamily {
     Ctf,
     Reporting,
     Web3,
+    ApiSecurity,
+    CloudSecurity,
+    ContainerSecurity,
+    NetworkSecurity,
+    Cryptography,
+    Forensics,
+    MalwareAnalysis,
+    SocialEngineering,
+    PhysicalSecurity,
+    IotSecurity,
+    MobileSecurity,
 }
 
 impl SkillFamily {
@@ -45,6 +56,17 @@ impl SkillFamily {
             Self::Ctf => "ctf",
             Self::Reporting => "reporting",
             Self::Web3 => "web3",
+            Self::ApiSecurity => "api_security",
+            Self::CloudSecurity => "cloud_security",
+            Self::ContainerSecurity => "container_security",
+            Self::NetworkSecurity => "network_security",
+            Self::Cryptography => "cryptography",
+            Self::Forensics => "forensics",
+            Self::MalwareAnalysis => "malware_analysis",
+            Self::SocialEngineering => "social_engineering",
+            Self::PhysicalSecurity => "physical_security",
+            Self::IotSecurity => "iot_security",
+            Self::MobileSecurity => "mobile_security",
         }
     }
 }
@@ -133,10 +155,40 @@ impl SkillRouter {
             rationale_parts.push("Small attack surface, more recon needed".to_string());
         }
 
+        // Compute confidence based on match strength and evidence diversity.
+        // More unique signal sources = higher confidence.
+        let signal_count = rationale_parts.len();
+        let has_mode_signal = scope.mode == super::scope::EngagementMode::Ctf
+            || scope.mode == super::scope::EngagementMode::BugBounty;
+        let has_tech_signal = !scope.all_technologies().is_empty();
+        let has_hypothesis_signal = hypothesis.is_some();
+        let has_endpoint_signal = !scope.discovered_endpoints.is_empty();
+
+        let signal_diversity = [
+            has_mode_signal,
+            has_tech_signal,
+            has_hypothesis_signal,
+            has_endpoint_signal,
+        ]
+        .iter()
+        .filter(|&&x| x)
+        .count();
+
+        // Confidence formula: base 0.2 + 0.15 per signal source, capped at 0.95
+        // More diverse evidence = higher confidence in routing decision
+        let confidence = if signal_count == 0 {
+            0.1
+        } else {
+            let base = 0.2_f64;
+            let per_signal = 0.15_f64;
+            let diversity_bonus = signal_diversity as f64 * 0.05;
+            (base + per_signal * signal_count as f64 + diversity_bonus).min(0.95)
+        };
+
         SkillRoute {
             skills: selected,
             rationale: rationale_parts.join("; "),
-            confidence: if rationale_parts.is_empty() { 0.3 } else { 0.7 },
+            confidence,
         }
     }
 
@@ -150,43 +202,160 @@ impl SkillRouter {
             .collect();
         let has_token = |t: &str| tokens.contains(&t);
 
+        // API & Protocol skills
         if lower.contains("graphql") {
             skills.push("graphql".to_string());
+            skills.push("graphql-introspection".to_string());
+            skills.push("graphql-batch-attack".to_string());
         }
         if lower.contains("grpc") {
             skills.push("grpc".to_string());
+            skills.push("grpc-reflection".to_string());
         }
         if lower.contains("websocket") || has_token("ws") {
             skills.push("websocket".to_string());
+            skills.push("websocket-hijacking".to_string());
         }
+        if lower.contains("rest") || lower.contains("api") {
+            skills.push("api-security".to_string());
+            skills.push("api-abuse".to_string());
+            skills.push("rate-limit-bypass".to_string());
+        }
+        if lower.contains("soap") || lower.contains("xml-rpc") {
+            skills.push("soap-security".to_string());
+        }
+        if lower.contains("json-rpc") || lower.contains("jsonrpc") {
+            skills.push("json-rpc-security".to_string());
+        }
+
+        // Frontend skills
         if lower.contains("react")
             || lower.contains("next")
             || lower.contains("vue")
             || lower.contains("angular")
+            || lower.contains("svelte")
+            || lower.contains("ember")
         {
             skills.push("spa-analysis".to_string());
+            skills.push("dom-xss".to_string());
+            skills.push("prototype-pollution".to_string());
         }
-        if lower.contains("node") || lower.contains("express") || lower.contains("fastify") {
+        if lower.contains("webpack") || lower.contains("vite") || lower.contains("rollup") {
+            skills.push("bundler-analysis".to_string());
+            skills.push("source-map-leak".to_string());
+        }
+        if lower.contains("service-worker") || lower.contains("pwa") {
+            skills.push("pwa-security".to_string());
+        }
+
+        // Backend skills
+        if lower.contains("node")
+            || lower.contains("express")
+            || lower.contains("fastify")
+            || lower.contains("koa")
+        {
             skills.push("javascript-analysis".to_string());
+            skills.push("nodejs-security".to_string());
+            skills.push("prototype-pollution".to_string());
+            skills.push("deserialization".to_string());
         }
+        if lower.contains("django") || lower.contains("flask") || lower.contains("fastapi") {
+            skills.push("python-security".to_string());
+            skills.push("python-deserialization".to_string());
+        }
+        if lower.contains("rails") || lower.contains("ruby") {
+            skills.push("rails-security".to_string());
+        }
+        if lower.contains("laravel") || lower.contains("symfony") || lower.contains("php") {
+            skills.push("php-security".to_string());
+        }
+        if lower.contains("spring") || lower.contains("java") || lower.contains("kotlin") {
+            skills.push("java-security".to_string());
+            skills.push("java-deserialization".to_string());
+        }
+        if lower.contains("dotnet") || lower.contains("csharp") || lower.contains("asp") {
+            skills.push("dotnet-security".to_string());
+        }
+        if lower.contains("golang") || lower.contains("go-") {
+            skills.push("go-security".to_string());
+        }
+        if lower.contains("rust") || lower.contains("actix") || lower.contains("rocket") {
+            skills.push("rust-security".to_string());
+        }
+
+        // Auth & Identity skills
         if lower.contains("oauth") || lower.contains("oidc") {
             skills.push("oauth-analysis".to_string());
+            skills.push("oauth-misconfiguration".to_string());
         }
         if lower.contains("jwt") {
             skills.push("jwt-analysis".to_string());
+            skills.push("jwt-attack".to_string());
         }
+        if lower.contains("saml") {
+            skills.push("saml-analysis".to_string());
+            skills.push("saml-injection".to_string());
+        }
+        if lower.contains("ldap") || lower.contains("ad") || lower.contains("active-directory") {
+            skills.push("ldap-security".to_string());
+            skills.push("ldap-injection".to_string());
+        }
+        if lower.contains("kerberos") || lower.contains("ntlm") {
+            skills.push("windows-auth-security".to_string());
+        }
+        if lower.contains("mfa") || lower.contains("2fa") || lower.contains("totp") {
+            skills.push("mfa-bypass".to_string());
+        }
+
+        // Infrastructure skills
         if lower.contains("kubernetes") || lower.contains("k8s") {
             skills.push("kubernetes".to_string());
+            skills.push("kubernetes-rbac".to_string());
+            skills.push("kubernetes-escape".to_string());
         }
         if lower.contains("docker") || lower.contains("container") {
             skills.push("containers".to_string());
+            skills.push("container-escape".to_string());
         }
         if lower.contains("serverless") || lower.contains("lambda") || lower.contains("function") {
             skills.push("serverless".to_string());
+            skills.push("serverless-security".to_string());
         }
         if lower.contains("aws") || lower.contains("azure") || lower.contains("gcp") {
             skills.push("cloud".to_string());
+            skills.push("cloud-misconfiguration".to_string());
+            skills.push("cloud-metadata-ssrf".to_string());
         }
+        if lower.contains("terraform") || lower.contains("pulumi") {
+            skills.push("iac-security".to_string());
+        }
+        if lower.contains("nginx") || lower.contains("apache") || lower.contains("iis") {
+            skills.push("web-server-security".to_string());
+            skills.push("http-smuggling".to_string());
+        }
+        if lower.contains("redis") || lower.contains("memcached") {
+            skills.push("cache-security".to_string());
+            skills.push("cache-poisoning".to_string());
+        }
+        if lower.contains("elasticsearch") || lower.contains("solr") {
+            skills.push("search-engine-security".to_string());
+        }
+        if lower.contains("kafka") || lower.contains("rabbitmq") {
+            skills.push("message-queue-security".to_string());
+        }
+
+        // Database skills
+        if lower.contains("mysql") || lower.contains("postgres") || lower.contains("mariadb") {
+            skills.push("sql-injection".to_string());
+            skills.push("database-security".to_string());
+        }
+        if lower.contains("mongodb") || lower.contains("nosql") {
+            skills.push("nosql-injection".to_string());
+        }
+        if lower.contains("cassandra") || lower.contains("dynamodb") {
+            skills.push("nosql-security".to_string());
+        }
+
         // Web3 / EVM stack routes to the dedicated security-research skill,
         // which carries its own domain references (accounting, oracles,
         // bridges, governance, exploit chaining).
@@ -198,35 +367,94 @@ impl SkillRouter {
             || lower.contains("defi")
             || lower.contains("erc20")
             || lower.contains("erc4626")
+            || lower.contains("erc721")
+            || lower.contains("erc1155")
+            // These were a second, separate `if` that re-pushed the same skill.
+            // `lower == "solidity"` is already implied by the `contains` above,
+            // so tech "solidity" used to load this skill twice.
+            || lower == "vyper"
+            || lower == "cairo"
         {
             skills.push("web3-security-research".to_string());
         }
-        if lower == "solidity" || lower == "vyper" || lower == "cairo" {
-            skills.push("web3-security-research".to_string());
+
+        // Mobile skills
+        if lower.contains("android") || lower.contains("ios") || lower.contains("mobile") {
+            skills.push("mobile-security".to_string());
+            skills.push("mobile-api-security".to_string());
+        }
+        if lower.contains("react-native") || lower.contains("flutter") {
+            skills.push("hybrid-app-security".to_string());
         }
 
+        // IoT skills
+        if lower.contains("iot") || lower.contains("embedded") || lower.contains("firmware") {
+            skills.push("iot-security".to_string());
+            skills.push("firmware-analysis".to_string());
+        }
+
+        // Network skills
+        if lower.contains("tcp") || lower.contains("udp") || lower.contains("network") {
+            skills.push("network-security".to_string());
+        }
+        if lower.contains("dns") {
+            skills.push("dns-security".to_string());
+            skills.push("dns-rebinding".to_string());
+        }
+        if lower.contains("vpn") || lower.contains("wireguard") {
+            skills.push("vpn-security".to_string());
+        }
+
+        // Cryptography skills
+        if lower.contains("tls") || lower.contains("ssl") {
+            skills.push("tls-security".to_string());
+            skills.push("certificate-analysis".to_string());
+        }
+        if lower.contains("crypto") || lower.contains("encryption") {
+            skills.push("cryptography".to_string());
+            skills.push("crypto-attack".to_string());
+        }
+
+        // Several independent conditions above can match the same technology
+        // and push the same skill, and the caller concatenates this list with
+        // the vuln-class list. Deduping here keeps order (priority signal)
+        // while dropping the repeats.
+        let mut seen = std::collections::HashSet::new();
+        skills.retain(|skill| seen.insert(skill.clone()));
         skills
     }
 
     /// Map a vulnerability class to applicable skills.
     fn skills_for_vuln_class(vuln_class: &VulnerabilityClass) -> Vec<String> {
         match vuln_class {
-            VulnerabilityClass::Xss | VulnerabilityClass::DomXss => vec!["xss".to_string()],
+            VulnerabilityClass::Xss | VulnerabilityClass::DomXss => {
+                vec!["xss".to_string(), "dom-xss".to_string()]
+            }
             VulnerabilityClass::SqlInjection => vec!["sqli".to_string()],
             VulnerabilityClass::NoSqlInjection => vec!["nosqli".to_string()],
-            VulnerabilityClass::Ssrf => vec!["ssrf".to_string()],
-            VulnerabilityClass::IdorBola => vec!["idor".to_string()],
+            VulnerabilityClass::Ssrf | VulnerabilityClass::ServerSideRequestForgery => {
+                vec!["ssrf".to_string()]
+            }
+            VulnerabilityClass::IdorBola | VulnerabilityClass::InsecureDirectObjectReference => {
+                vec!["idor".to_string()]
+            }
             VulnerabilityClass::CommandInjection => vec!["command-injection".to_string()],
-            VulnerabilityClass::Ssti => vec!["ssti".to_string()],
+            VulnerabilityClass::Ssti | VulnerabilityClass::TemplateInjection => {
+                vec!["ssti".to_string()]
+            }
             VulnerabilityClass::Xxe => vec!["xxe".to_string()],
             VulnerabilityClass::Lfi | VulnerabilityClass::PathTraversal => vec!["lfi".to_string()],
-            VulnerabilityClass::Csrf => vec!["csrf".to_string()],
+            VulnerabilityClass::Csrf | VulnerabilityClass::ClientSideRequestForgery => {
+                vec!["csrf".to_string()]
+            }
             VulnerabilityClass::CorsMisconfiguration => vec!["cors".to_string()],
             VulnerabilityClass::OpenRedirect => vec!["open-redirect".to_string()],
             VulnerabilityClass::AuthenticationBypass => vec!["authentication-analysis".to_string()],
             VulnerabilityClass::MfaBypass => vec!["mfa-analysis".to_string()],
             VulnerabilityClass::Bfla => vec!["bfla".to_string()],
-            VulnerabilityClass::RaceCondition => vec!["race-condition".to_string()],
+            VulnerabilityClass::RaceCondition
+            | VulnerabilityClass::SessionRaceCondition
+            | VulnerabilityClass::RaceConditionFile => vec!["race-condition".to_string()],
             VulnerabilityClass::BusinessLogicFlaw => vec!["business-logic".to_string()],
             VulnerabilityClass::FileUpload => vec!["file-upload".to_string()],
             VulnerabilityClass::InsecureDeserialization => vec!["deserialization".to_string()],
@@ -238,13 +466,72 @@ impl SkillRouter {
             VulnerabilityClass::PaymentManipulation => vec!["payment-manipulation".to_string()],
             VulnerabilityClass::WorkflowBypass => vec!["workflow-bypass".to_string()],
             VulnerabilityClass::SensitiveDataExposure
-            | VulnerabilityClass::InformationDisclosure => {
+            | VulnerabilityClass::InformationDisclosure
+            | VulnerabilityClass::ExcessiveDataExposure => {
                 vec!["source-leak-analysis".to_string()]
             }
-            VulnerabilityClass::Misconfiguration => vec!["technology-fingerprinting".to_string()],
-            VulnerabilityClass::CryptographicWeakness => vec!["crypto-analysis".to_string()],
+            VulnerabilityClass::Misconfiguration | VulnerabilityClass::SecurityMisconfiguration => {
+                vec!["technology-fingerprinting".to_string()]
+            }
+            VulnerabilityClass::CryptographicWeakness | VulnerabilityClass::WeakCryptography => {
+                vec!["crypto-analysis".to_string()]
+            }
             VulnerabilityClass::InsecureStorage => vec!["secret-analysis".to_string()],
-            VulnerabilityClass::LdapInjection => vec!["command-injection".to_string()],
+            VulnerabilityClass::LdapInjection | VulnerabilityClass::LdapInjectionAdvanced => {
+                vec!["command-injection".to_string()]
+            }
+            // Modern vulnerability classes
+            VulnerabilityClass::PrototypePollution => vec!["prototype-pollution".to_string()],
+            VulnerabilityClass::GraphQlInjection => vec!["graphql".to_string()],
+            VulnerabilityClass::JwtAttack => {
+                vec!["jwt-analysis".to_string(), "jwt-attack".to_string()]
+            }
+            VulnerabilityClass::WebsocketHijacking => {
+                vec!["websocket".to_string(), "websocket-hijacking".to_string()]
+            }
+            VulnerabilityClass::SubdomainTakeover => vec!["subdomain-takeover".to_string()],
+            VulnerabilityClass::CachePoisoning => vec!["cache-poisoning".to_string()],
+            VulnerabilityClass::HttpRequestSmuggling => vec!["http-smuggling".to_string()],
+            VulnerabilityClass::OAuthMisconfiguration => vec![
+                "oauth-analysis".to_string(),
+                "oauth-misconfiguration".to_string(),
+            ],
+            VulnerabilityClass::SamlInjection => vec!["saml-analysis".to_string()],
+            VulnerabilityClass::EsiInjection => vec!["esi-injection".to_string()],
+            VulnerabilityClass::HttpResponseSplitting => {
+                vec!["http-response-splitting".to_string()]
+            }
+            VulnerabilityClass::MassAssignment => vec!["mass-assignment".to_string()],
+            VulnerabilityClass::DOMClobbering => vec!["dom-clobbering".to_string()],
+            VulnerabilityClass::PostMessageVulnerability => vec!["post-message".to_string()],
+            VulnerabilityClass::WebCacheDeception => vec!["web-cache-deception".to_string()],
+            VulnerabilityClass::HostHeaderInjection => vec!["host-header-injection".to_string()],
+            VulnerabilityClass::PasswordResetPoisoning => {
+                vec!["password-reset-poisoning".to_string()]
+            }
+            VulnerabilityClass::EmailHeaderInjection => vec!["email-header-injection".to_string()],
+            VulnerabilityClass::UnicodeNormalization => vec!["unicode-normalization".to_string()],
+            VulnerabilityClass::BufferOverflow => vec!["buffer-overflow".to_string()],
+            VulnerabilityClass::IntegerOverflow => vec!["integer-overflow".to_string()],
+            VulnerabilityClass::FormatString => vec!["format-string".to_string()],
+            VulnerabilityClass::UseAfterFree => vec!["use-after-free".to_string()],
+            VulnerabilityClass::DoubleFree => vec!["double-free".to_string()],
+            VulnerabilityClass::SymlinkAttack => vec!["symlink-attack".to_string()],
+            VulnerabilityClass::HardcodedCredentials => vec!["hardcoded-credentials".to_string()],
+            VulnerabilityClass::InsufficientLogging => vec!["insufficient-logging".to_string()],
+            VulnerabilityClass::ImproperInputValidation => vec!["input-validation".to_string()],
+            VulnerabilityClass::MissingAuthorization => vec!["missing-authorization".to_string()],
+            VulnerabilityClass::BrokenAccessControl => vec!["broken-access-control".to_string()],
+            VulnerabilityClass::VulnerableComponents => vec!["vulnerable-components".to_string()],
+            VulnerabilityClass::InsufficientMonitoring => {
+                vec!["insufficient-monitoring".to_string()]
+            }
+            VulnerabilityClass::ApiAbuse => vec!["api-abuse".to_string()],
+            VulnerabilityClass::RateLimitBypass => vec!["rate-limit-bypass".to_string()],
+            VulnerabilityClass::PaginationAbuse => vec!["pagination-abuse".to_string()],
+            VulnerabilityClass::FilterBypass => vec!["filter-bypass".to_string()],
+            VulnerabilityClass::EncodingBypass => vec!["encoding-bypass".to_string()],
+            VulnerabilityClass::WafBypass => vec!["waf-bypass".to_string()],
             VulnerabilityClass::Custom(custom) => {
                 let mut skills = vec!["source-code-audit".to_string()];
                 // Web3 hypotheses arrive as Custom("reentrancy ...") etc.
@@ -260,6 +547,8 @@ impl SkillRouter {
                     "vault",
                     "erc4626",
                     "erc20",
+                    "erc721",
+                    "erc1155",
                     "amm",
                     "uniswap",
                     "lending",
@@ -286,6 +575,13 @@ impl SkillRouter {
                     "share",
                     "inflation",
                     "donation",
+                    "erc",
+                    "token",
+                    "nft",
+                    "dex",
+                    "yield",
+                    "staking",
+                    "farming",
                 ];
                 if WEB3_KEYWORDS.iter().any(|k| lower.contains(k))
                     && !skills.contains(&"web3-security-research".to_string())
@@ -355,6 +651,7 @@ mod tests {
             requires_auth: true,
             discovered_by: "recon".into(),
             noise_level: super::super::noise::NoiseLevel::Moderate,
+            ..Default::default()
         });
         let route = SkillRouter::route(&scope, None);
         assert!(route.skills.contains(&"api-discovery".to_string()));

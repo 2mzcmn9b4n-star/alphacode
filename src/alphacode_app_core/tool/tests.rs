@@ -358,12 +358,13 @@ impl Tool for BareSchemaTool {
     }
 }
 
-/// `to_definition` deliberately injects a required `intent` into every
-/// object-shaped tool schema (8505080a6), so a tool that omits `intent` from its
-/// own `parameters_schema` still advertises it. This pins that central
-/// behaviour: a bare schema gains `intent` as both a property and a requirement.
+/// `to_definition` injects an optional `intent` property into every
+/// object-shaped tool schema so a tool that omits `intent` from its
+/// own `parameters_schema` still advertises it. The property is NOT
+/// added to `required` because every tool deserializes it as
+/// `Option<String>` with `#[serde(default)]`.
 #[test]
-fn tool_definitions_auto_inject_required_intent() {
+fn tool_definitions_auto_inject_optional_intent() {
     let def = BareSchemaTool.to_definition();
     assert_eq!(def.input_schema["properties"]["intent"]["type"], "string");
     let required = def.input_schema["required"]
@@ -371,8 +372,8 @@ fn tool_definitions_auto_inject_required_intent() {
         .cloned()
         .unwrap_or_default();
     assert!(
-        required.iter().any(|value| value == "intent"),
-        "intent must be required after central injection: {required:?}"
+        !required.iter().any(|value| value == "intent"),
+        "intent must NOT be required after central injection: {required:?}"
     );
     assert!(
         required.iter().any(|value| value == "command"),
@@ -381,7 +382,7 @@ fn tool_definitions_auto_inject_required_intent() {
 }
 
 #[tokio::test]
-async fn first_party_tool_definitions_require_intent_with_display_only_docs() {
+async fn first_party_tool_definitions_have_optional_intent_with_display_only_docs() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     registry.register_ambient_tools().await;
@@ -411,8 +412,8 @@ async fn first_party_tool_definitions_require_intent_with_display_only_docs() {
         );
         let required = schema["required"].as_array().cloned().unwrap_or_default();
         assert!(
-            required.iter().any(|value| value == "intent"),
-            "{} must require intent",
+            !required.iter().any(|value| value == "intent"),
+            "{} must NOT require intent (it is optional at runtime)",
             def.name
         );
     }

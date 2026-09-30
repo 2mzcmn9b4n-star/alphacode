@@ -442,8 +442,11 @@ fn quality_guarantees_line() -> Line<'static> {
                 .fg(welcome_accent())
                 .add_modifier(Modifier::BOLD),
         ),
+        // "Verified, not assumed" tripped the onboarding Tier 6 guard, which
+        // forbids negation words in prose (`not`) so instructions read as
+        // positive claims. "Evidence over assertion" says the same thing.
         Span::styled(
-            "•  Verified, not assumed  •  No silent regressions",
+            "•  Evidence over assertion  •  No silent regressions",
             Style::default().fg(rgb(150, 160, 178)),
         ),
     ])

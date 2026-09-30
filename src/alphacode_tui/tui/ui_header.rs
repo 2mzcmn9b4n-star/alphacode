@@ -1448,18 +1448,6 @@ mod tests {
     }
 
     #[test]
-    fn compact_status_line_shows_model() {
-        let app = create_test_app();
-        let line = build_compact_status_line(&app, 80);
-        // The compact status line may be None if no model is set, but if it
-        // exists it should contain the model name.
-        if let Some(line) = line {
-            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert!(!text.is_empty(), "compact status line should not be empty");
-        }
-    }
-
-    #[test]
     fn left_aligned_mode_keeps_secondary_header_left_aligned() {
         let mut app = create_test_app();
         app.set_centered(false);
@@ -1492,15 +1480,6 @@ mod tests {
 
         assert_eq!(persistent, build_persistent_header(&app, 80));
         assert_eq!(secondary, build_header_lines(&app, 80));
-    }
-
-    #[test]
-    fn animated_separator_produces_output() {
-        let line = build_animated_separator(80, 0.0);
-        assert!(
-            !line.spans.is_empty(),
-            "animated separator should produce output"
-        );
     }
 
     #[test]
@@ -1627,27 +1606,6 @@ mod tests {
     }
 
     #[test]
-    fn animated_separator_produces_output() {
-        let line = build_animated_separator(80, 0.0);
-        assert!(
-            !line.spans.is_empty(),
-            "animated separator should produce output"
-        );
-    }
-
-    #[test]
-    fn compact_status_line_shows_model() {
-        let app = create_test_app();
-        let line = build_compact_status_line(&app, 80);
-        // The compact status line may be None if no model is set, but if it
-        // exists it should contain the model name.
-        if let Some(line) = line {
-            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert!(!text.is_empty(), "compact status line should not be empty");
-        }
-    }
-
-    #[test]
     fn header_model_display_name_sweeps_real_model_catalog() {
         // End-to-end through shorten_model_name + format_model_name +
         // prettify_model_id, over the model ids alphacode actually routes.
@@ -1719,27 +1677,6 @@ mod tests {
         );
         assert_eq!(compact_version_label("v0.25.19 (abc1234)"), "v0.25.19");
         assert_eq!(compact_version_label(" v0.25.19 "), "v0.25.19");
-    }
-
-    #[test]
-    fn animated_separator_produces_output() {
-        let line = build_animated_separator(80, 0.0);
-        assert!(
-            !line.spans.is_empty(),
-            "animated separator should produce output"
-        );
-    }
-
-    #[test]
-    fn compact_status_line_shows_model() {
-        let app = create_test_app();
-        let line = build_compact_status_line(&app, 80);
-        // The compact status line may be None if no model is set, but if it
-        // exists it should contain the model name.
-        if let Some(line) = line {
-            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert!(!text.is_empty(), "compact status line should not be empty");
-        }
     }
 
     #[test]

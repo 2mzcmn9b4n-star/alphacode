@@ -50,7 +50,14 @@ pub async fn run_bounded(
     args: &[String],
     timeout: Duration,
 ) -> Result<std::process::Output, String> {
-    let mut cmd = tokio::process::Command::new(program);
+    // Spawn the Go-installed build when there is one. Done here rather than in
+    // each wrapper so every recon tool gets it: `httpx` collides with the
+    // Python HTTP client, and Go's `~/go/bin` is not on PATH by default on
+    // Windows, so the collision is the common case, not an edge case. The
+    // caller-supplied name is still what errors refer to.
+    let resolved = resolve_program(program);
+
+    let mut cmd = tokio::process::Command::new(resolved);
     cmd.args(args)
         // Without this, dropping the `Child` on timeout detaches the process
         // instead of killing it and it keeps running in the background.
@@ -242,9 +249,72 @@ pub fn install_hint(binary: &str) -> String {
     crate::alphacode_app_core::bugbounty_install::install_hint_for(binary)
 }
 
+/// Resolve the program to run for a recon binary, preferring a Go-installed
+/// one over whatever `PATH` resolves first.
+///
+/// `httpx` is the motivating case: the Python HTTP client installs a CLI of
+/// exactly the same name, and whichever comes first on `PATH` wins. On a
+/// machine with both installed, the bare name `httpx` runs the Python client,
+/// which exits 0 for `httpx <url>` and prints `Usage: httpx [OPTIONS] URL` —
+/// so its output was previously accepted as if it were a scan.
+///
+/// The Go toolchain writes to `~/go/bin`, which is not on `PATH` by default on
+/// Windows, so the Go install is frequently present *and* unreachable by name.
+/// Consult that directory explicitly before falling back to `PATH`.
+///
+/// Returns the bare name when nothing better can be found, so the caller's
+/// error message still names the binary the user has to fix.
+pub fn resolve_program(binary: &str) -> String {
+    let exe = if cfg!(windows) {
+        format!("{binary}.exe")
+    } else {
+        binary.to_string()
+    };
+    if let Some(dir) = crate::alphacode_app_core::bugbounty_install::go_bin_dir() {
+        let candidate = dir.join(&exe);
+        if candidate.is_file() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+    binary.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_program_prefers_the_go_bin_copy_when_present() {
+        // `go_bin_dir` honours GOBIN, so this pins the lookup deterministically
+        // without depending on what the developer happens to have installed.
+        let dir = tempfile::Builder::new()
+            .prefix("alphacode-gobin-")
+            .tempdir()
+            .expect("tempdir");
+        let exe = if cfg!(windows) { "httpx.exe" } else { "httpx" };
+        let planted = dir.path().join(exe);
+        std::fs::write(&planted, b"not really httpx").expect("write");
+
+        // SAFETY: single-threaded for the duration of this assertion; the test
+        // harness runs this test alone unless the suite is run concurrently.
+        unsafe { std::env::set_var("GOBIN", dir.path()) };
+        let resolved = resolve_program("httpx");
+        unsafe { std::env::remove_var("GOBIN") };
+
+        assert_eq!(
+            resolved,
+            planted.to_string_lossy().to_string(),
+            "the Go-installed httpx must win over whatever PATH resolves first"
+        );
+    }
+
+    #[test]
+    fn resolve_program_falls_back_to_the_bare_name() {
+        unsafe { std::env::set_var("GOBIN", "definitely-not-a-real-dir") };
+        let resolved = resolve_program("httpx");
+        unsafe { std::env::remove_var("GOBIN") };
+        assert_eq!(resolved, "httpx", "must still name the binary to fix");
+    }
 
     #[test]
     fn leading_dash_domain_is_rejected() {

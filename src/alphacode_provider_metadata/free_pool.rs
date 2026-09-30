@@ -67,7 +67,13 @@ use super::catalog::ALPHAX_FREE_PROFILE;
 /// Kilo adds later is picked up without a release.
 pub const CURATED_FREE_MODELS: &[&str] = &[
     "kilo-auto/free",
-    "openrouter/free",
+    // `openrouter/free` was removed from this list: the gateway answered it
+    // with `No endpoints found for openrouter/free ... failed_routing_step:
+    // "Filter by Fallback"`, i.e. every candidate endpoint had been removed by
+    // routing policy. It is a synthetic alias rather than a concrete model, so
+    // it can be unroutable at any time depending on which upstreams the
+    // gateway is willing to serve free traffic to. Kept only as a recognised id
+    // (so an existing selection still rotates) but no longer a rotation target.
     "poolside/laguna-s-2.1:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
     "inclusionai/ling-3.0-flash-sante:free",
@@ -176,6 +182,8 @@ impl PipeDedup for Vec<String> {
 /// Verified values, matching `context_length` from the live gateway.
 pub const FREE_MODEL_CONTEXT_LIMITS: &[(&str, usize)] = &[
     ("kilo-auto/free", 256_000),
+    // Retained even though it left the rotation list: a session already pinned
+    // to it still needs a context budget before it rotates off.
     ("openrouter/free", 200_000),
     ("poolside/laguna-s-2.1:free", 262_144),
     ("poolside/laguna-xs-2.1:free", 262_144),

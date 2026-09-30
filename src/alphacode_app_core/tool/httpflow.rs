@@ -673,16 +673,16 @@ impl HttpFlowTool {
         }
 
         // Check headers for bot protection indicators
-        if let Some(server) = headers.get("server") {
-            if server.contains("cloudflare") || server.contains("Cloudflare") {
-                return true;
-            }
+        if let Some(server) = headers.get("server")
+            && (server.contains("cloudflare") || server.contains("Cloudflare"))
+        {
+            return true;
         }
 
-        if let Some(cf_ray) = headers.get("cf-ray") {
-            if !cf_ray.is_empty() {
-                return true;
-            }
+        if let Some(cf_ray) = headers.get("cf-ray")
+            && !cf_ray.is_empty()
+        {
+            return true;
         }
 
         false

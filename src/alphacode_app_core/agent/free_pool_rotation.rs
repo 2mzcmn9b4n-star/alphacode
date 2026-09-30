@@ -66,6 +66,17 @@ const TRANSIENT_QUARANTINE: Duration = Duration::from_secs(60);
 /// again quickly, and rotation is only a nudge, not a verdict.
 const EMPTY_RESPONSE_QUARANTINE: Duration = Duration::from_secs(30);
 
+/// Quarantine window after the gateway reports it has no route for a model id.
+///
+/// Long enough to stop the thrash that prompted it. The observed loop was:
+/// rotate onto a model the gateway does not currently serve, get a 404, fall
+/// back to `kilo-auto/free`, hit a real rate limit, and rotate back onto the
+/// unroutable id — repeating every few minutes for the life of the session. A
+/// routing 404 is a statement about the gateway's current lineup, not a
+/// capacity blip, so it is worth waiting out a refresh cycle rather than
+/// re-testing a model that does not exist.
+const UNROUTABLE_QUARANTINE: Duration = Duration::from_secs(30 * 60);
+
 /// How the failure should be classified for quarantine purposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RotationTrigger {
@@ -75,6 +86,14 @@ pub(crate) enum RotationTrigger {
     Transient,
     /// The model responded but produced nothing usable.
     EmptyResponse,
+    /// The gateway has no route for this model id at all (HTTP 404 with
+    /// "No endpoints found" / "no provider or endpoint was found").
+    ///
+    /// This is categorically different from the others: a 404 on routing is not
+    /// a capacity signal, it means the model is not currently served. A short
+    /// cooldown would put a model that is simply *not there* back into rotation
+    /// every few minutes, producing the same 404 forever.
+    Unroutable,
 }
 
 impl RotationTrigger {
@@ -83,6 +102,7 @@ impl RotationTrigger {
             Self::RateLimited => RATE_LIMIT_QUARANTINE,
             Self::Transient => TRANSIENT_QUARANTINE,
             Self::EmptyResponse => EMPTY_RESPONSE_QUARANTINE,
+            Self::Unroutable => UNROUTABLE_QUARANTINE,
         }
     }
 }
@@ -91,6 +111,9 @@ impl RotationTrigger {
 #[derive(Debug, Clone, Copy)]
 struct Quarantine {
     until: Instant,
+    /// Why the model was quarantined. Retained so an `Unroutable` model can be
+    /// distinguished from a merely-busy one when the pool runs dry.
+    trigger: RotationTrigger,
 }
 
 /// Process-wide model quarantine map, keyed by model id.
@@ -156,6 +179,7 @@ pub fn quarantine_model(model: &str, trigger: RotationTrigger) {
         model.to_string(),
         Quarantine {
             until: Instant::now() + trigger.quarantine(),
+            trigger,
         },
     );
     crate::alphacode_base::logging::info(&format!(
@@ -240,23 +264,41 @@ pub fn next_free_model(current: &str) -> Option<String> {
         })
         .unwrap_or_default();
 
+    // `healthy` is every currently-quarantined model. A model quarantined as
+    // `Unroutable` is not a candidate no matter how long the others are willing
+    // to wait: the gateway told us it has no endpoint for that id, so falling
+    // back to it just reproduces the same 404. This is the branch that stopped
+    // the reported thrash, where an unroutable id kept winning the
+    // soonest-to-expire race every few minutes and the session never settled on
+    // a working model.
+    let soonest_recoverable = |allow_unroutable: bool| {
+        let Ok(map) = quarantine_map().lock() else {
+            return None;
+        };
+        healthy
+            .iter()
+            .filter(|candidate| allow_unroutable || !is_quarantined_unroutable(candidate, &map))
+            // A missing entry sorts first via `now`; every real quarantine is in
+            // the future, so this picks whoever recovers soonest.
+            .min_by_key(|candidate| map.get(*candidate).map(|q| q.until).unwrap_or(now))
+            .cloned()
+    };
+
     effective_free_pool()
         .into_iter()
         .find(|candidate| candidate != current && !quarantined.contains(candidate))
-        .or_else(|| {
-            // Everything is quarantined. If any entry has already expired we
-            // would have pruned it above, so this really is "pool exhausted".
-            // Still allow the soonest-to-expire member rather than giving up:
-            // waiting for one model to recover beats stalling the turn, and the
-            // caller's own bounded budget prevents an infinite loop.
-            healthy.into_iter().min_by_key(|candidate| {
-                quarantine_map()
-                    .lock()
-                    .ok()
-                    .and_then(|map| map.get(candidate).map(|q| q.until))
-                    .unwrap_or(now)
-            })
-        })
+        .or_else(|| soonest_recoverable(false))
+        // Genuinely nothing but unroutable ids left: prefer a non-unroutable
+        // pool member, and only then allow one back so the turn is not stalled
+        // forever by a pool the gateway has stopped serving.
+        .or_else(|| effective_free_pool().into_iter().find(|c| c != current))
+        .or_else(|| soonest_recoverable(true))
+}
+
+/// Is this model's current quarantine an `Unroutable` one?
+fn is_quarantined_unroutable(model: &str, map: &HashMap<String, Quarantine>) -> bool {
+    map.get(model)
+        .is_some_and(|q| q.trigger == RotationTrigger::Unroutable)
 }
 
 /// Provider snapshot describing a rotation, for the UI event.
@@ -278,6 +320,9 @@ impl RotationNotice {
             RotationTrigger::RateLimited => "rate limited",
             RotationTrigger::Transient => "temporarily unavailable",
             RotationTrigger::EmptyResponse => "returned no output",
+            // Say the model was not available rather than implying a capacity
+            // problem, which is what the user would otherwise assume.
+            RotationTrigger::Unroutable => "temporarily unavailable",
         };
         format!("{ALPHAX_FREE_DISPLAY_NAME} is {reason}; switching to another free model…")
     }
@@ -382,6 +427,54 @@ mod tests {
     fn rate_limits_quarantine_longer_than_blips() {
         assert!(RATE_LIMIT_QUARANTINE > TRANSIENT_QUARANTINE);
         assert!(TRANSIENT_QUARANTINE > EMPTY_RESPONSE_QUARANTINE);
+        // A model the gateway does not serve at all must be skipped for far
+        // longer than a busy one, or it simply re-enters rotation and 404s again.
+        assert!(UNROUTABLE_QUARANTINE > RATE_LIMIT_QUARANTINE);
+    }
+
+    /// The reported failure: an unroutable id kept winning the rotation because
+    /// it was quarantined no longer than a transient blip, so the session
+    /// thrashed between a 404 model and a rate-limited one indefinitely.
+    #[test]
+    fn an_unroutable_model_is_not_re_entered_while_the_pool_has_options() {
+        reset();
+        // The only other pool member is busy, so the pool looks exhausted.
+        quarantine_model("kilo-auto/free", RotationTrigger::RateLimited);
+        quarantine_model("poolside/laguna-s-2.1:free", RotationTrigger::Unroutable);
+
+        let next = next_free_model("poolside/laguna-s-2.1:free").expect("pool has members");
+        assert_ne!(
+            next, "poolside/laguna-s-2.1:free",
+            "the unroutable model must not be re-selected"
+        );
+    }
+
+    /// A busy model is a legitimate fallback once nothing else is available;
+    /// only the *unroutable* signal suppresses a model.
+    #[test]
+    fn a_busy_model_remains_a_valid_last_resort() {
+        reset();
+        quarantine_model("kilo-auto/free", RotationTrigger::RateLimited);
+        let next = next_free_model("kilo-auto/free").expect("pool is not exhausted yet");
+        assert_ne!(next, "kilo-auto/free");
+    }
+
+    #[test]
+    fn unroutable_is_recognised_only_with_routing_vocabulary() {
+        use crate::alphacode_app_core::agent::response_recovery::classify_rotation_trigger;
+
+        // The actual gateway response that prompted this change.
+        let real = r#"OpenAI-compatible chat request failed endpoint: https://openrouter.ai/api/v1/chat/completions
+model: openrouter/free status: 404 Not Found response: {"error":{"message":"No endpoints found for
+openrouter/free. Every candidate endpoint was removed during routing","code":404}}"#;
+        assert_eq!(classify_rotation_trigger(real), RotationTrigger::Unroutable);
+
+        // A 404 from a bad base URL is a configuration bug about the request,
+        // not a fact about the model, so it must keep the short window.
+        assert_eq!(
+            classify_rotation_trigger("404 Not Found: invalid base url, check /v1"),
+            RotationTrigger::Transient
+        );
     }
 
     #[test]

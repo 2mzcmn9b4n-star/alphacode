@@ -456,7 +456,10 @@ impl SelfImproveTool {
             for f in &failures {
                 if let Some(ref err) = f.error {
                     let short = if err.len() > 80 {
-                        format!("{}...", &err[..80])
+                        // Truncate on a char boundary: slicing at byte 80 can
+                        // land inside a multi-byte character in any non-ASCII
+                        // error text, which panics instead of truncating.
+                        format!("{}...", &err[..err.floor_char_boundary(80)])
                     } else {
                         err.clone()
                     };
@@ -511,7 +514,7 @@ fn normalize_error(error: &str) -> String {
         .join(" ");
 
     if normalized.len() > 120 {
-        format!("{}...", &normalized[..120])
+        format!("{}...", &normalized[..normalized.floor_char_boundary(120)])
     } else {
         normalized
     }
@@ -611,4 +614,35 @@ fn extract_correction_lesson(error_pattern: &str, task_type: &str) -> String {
         "Correction for {}: Recurring error: '{}'. Investigate root cause and apply fix before retrying.",
         task_type, first_sentence
     )
+}
+
+#[cfg(test)]
+mod utf8_truncation_tests {
+    use super::normalize_error;
+
+    /// Regression: truncation used to slice at a raw byte offset
+    /// (`&s[..120]`), which panics when that offset lands inside a multi-byte
+    /// character. `é` is 2 bytes, so an odd byte offset is always mid-character.
+    #[test]
+    fn normalize_error_does_not_panic_on_multibyte_input() {
+        // 200 two-byte characters = 400 bytes; byte 120 is mid-character.
+        let input = "é".repeat(200);
+        let normalized = normalize_error(&input);
+        // Must return something valid UTF-8 rather than panicking, and must be
+        // truncated with the ellipsis.
+        assert!(
+            normalized.ends_with("..."),
+            "expected truncation: {normalized}"
+        );
+        // The kept portion must be whole characters, never a replacement char.
+        assert!(!normalized.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn normalize_error_handles_ascii_unchanged() {
+        let input = "a".repeat(200);
+        let normalized = normalize_error(&input);
+        assert!(normalized.ends_with("..."));
+        assert!(normalized.starts_with(&"a".repeat(100)));
+    }
 }
