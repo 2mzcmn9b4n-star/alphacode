@@ -7,6 +7,7 @@
 #   iwr -useb ... | iex -Prefix "$env:LOCALAPPDATA\Programs\alphacode"
 #   iwr -useb ... | iex -FromSource                  # skip release, build locally
 #   iwr -useb ... | iex -SourceRef main               # build from a specific ref
+#   iwr -useb ... | iex -SkipPathUpdate               # skip automatic PATH update
 #
 # By default, tries to download a prebuilt release asset. If no release is
 # published (or there is no asset for this OS/arch), it falls back to
@@ -19,6 +20,7 @@ param(
   [string]$Prefix    = $env:ALPHACODE_PREFIX,
   [string]$BinDir    = $env:ALPHACODE_BIN_DIR,
   [switch]$NoPath,
+  [switch]$SkipPathUpdate,
   [switch]$FromSource,
   [switch]$SourceOnly,
   [string]$SourceRef = $env:ALPHACODE_SOURCE_REF
@@ -38,18 +40,58 @@ function Print([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Warn ([string]$msg) { Write-Host "[warn] $msg" -ForegroundColor Yellow }
 function Fail ([string]$msg) { Write-Host "[fail] $msg" -ForegroundColor Red; exit 1 }
 
-# --- build_from_source -------------------------------------------------------
-#
-# Fallback: no release artifact for this platform/arch. Clone the repo, build
-# with cargo, and copy the resulting binary into $BinDir.
-#
-# Requires: git, cargo, rustc >= 1.91, and a working C toolchain. This can
-# take 5-30 minutes on a first build.
+function Update-UserPath {
+  param(
+    [string]$BinDir,
+    [switch]$Force
+  )
+
+  try {
+    $regPath = 'HKCU:\Environment'
+    $pathValue = (Get-ItemProperty -Path $regPath -Name 'Path' -ErrorAction SilentlyContinue).Path
+
+    if (-not $pathValue) {
+      $pathValue = ''
+    }
+
+    $pathEntries = @($pathValue -split [IO.Path]::PathSeparator | Where-Object { $_ -and (-not [string]::IsNullOrWhiteSpace($_)) })
+
+    $binDirNormalized = [System.IO.Path]::GetFullPath($BinDir)
+    $alreadyInPath = $false
+    foreach ($entry in $pathEntries) {
+      $entryNormalized = [System.IO.Path]::GetFullPath($entry)
+      if ($entryNormalized -ieq $binDirNormalized) {
+        $alreadyInPath = $true
+        break
+      }
+    }
+
+    if ($alreadyInPath -and -not $Force) {
+      Print "PATH already contains $BinDir"
+      return $true
+    }
+
+    if (-not $alreadyInPath) {
+      $pathEntries += $BinDir
+      $newPathValue = $pathEntries -join [IO.Path]::PathSeparator
+      Set-ItemProperty -Path $regPath -Name 'Path' -Value $newPathValue -Type String
+      Print "Added $BinDir to user PATH"
+    }
+
+    $env:PATH = [System.Environment]::GetEnvironmentVariable('Path', 'User') + [IO.Path]::PathSeparator + [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+
+    return $true
+  } catch {
+    Warn "Could not update PATH automatically: $($_.Exception.Message)"
+    Warn "Please manually add $BinDir to your PATH environment variable."
+    return $false
+  }
+}
+
 function Build-FromSource {
   if (-not (Get-Command git   -ErrorAction SilentlyContinue)) { Fail "git is required to build from source" }
   if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { Fail "cargo is required to build from source (install Rust from https://rustup.rs)" }
 
-  # rustc >= 1.91 (edition 2024 + current dependency MSRV) check.
   $rv = (& rustc --version) 2>$null
   if ($rv -match 'rustc\s+(\d+)\.(\d+)') {
     $major = [int]$Matches[1]; $minor = [int]$Matches[2]
@@ -73,12 +115,6 @@ function Build-FromSource {
     }
 
     Print "Compiling alphacode (this can take 5-30 minutes on a first build) ..."
-    # NOTE: no --locked on purpose. The committed Cargo.lock does not list
-    # platform-conditional deps for every target triple, and CI itself runs
-    # without `--locked` (see .github/workflows/release.yml: `locked: false`).
-    # If we passed --locked here, a fresh source build on a platform the
-    # lockfile wasn't regenerated for would fail with
-    # "Cargo.lock needs to be updated".
     & cargo build --release --manifest-path "$srcDir\src\Cargo.toml"
     if ($LASTEXITCODE -ne 0) { Fail "cargo build failed" }
 
@@ -96,8 +132,6 @@ function Build-FromSource {
   }
 }
 
-# --- Architecture ------------------------------------------------------------
-
 switch ($env:PROCESSOR_ARCHITECTURE) {
   'AMD64' { $Arch = 'x86_64' }
   'ARM64' { $Arch = 'arm64' }
@@ -111,9 +145,6 @@ if ($IsWindows -or ($env:OS -eq 'Windows_NT')) {
   Fail "this script is for Windows. On Linux/macOS use scripts/install.sh."
 }
 
-# --- Version -----------------------------------------------------------------
-
-# Short-circuit: build from source only.
 if ($FromSource) {
   Print '[FromSource] requested, skipping release download.'
   Build-FromSource
@@ -140,8 +171,6 @@ if ($Version -eq 'latest') {
 }
 $VersionNoV = $Version.TrimStart('v')
 
-# --- Download ----------------------------------------------------------------
-
 $Tmp      = [System.IO.Path]::GetTempPath() + [System.Guid]::NewGuid().ToString('N')
 $ZipPath  = Join-Path $Tmp $asset
 $Extract  = Join-Path $Tmp 'extract'
@@ -160,7 +189,6 @@ try {
   return
 }
 
-# Optional checksum verification
 try {
   $sums = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/download/$Version/SHA256SUMS" -UseBasicParsing -ErrorAction Stop
   $expected = ($sums.Content -split "`n" | Where-Object { $_ -like "*$asset*" } | Select-Object -First 1)
@@ -176,8 +204,6 @@ try {
   Warn "could not fetch/verify SHA256SUMS — continuing"
 }
 
-# --- Extract -----------------------------------------------------------------
-
 Print "Extracting ..."
 try {
   Expand-Archive -Path $ZipPath -DestinationPath $Extract -Force
@@ -190,13 +216,10 @@ if (-not $binary) {
   Fail "extracted archive did not contain 'alphacode.exe'"
 }
 
-# --- Install -----------------------------------------------------------------
-
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 $installedExe = Join-Path $BinDir 'alphacode.exe'
 Copy-Item -Path $binary.FullName -Destination $installedExe -Force
 
-# Also copy .bin payload files if present (release wrapper scripts need them).
 $payloadFiles = Get-ChildItem -Path $Extract -Recurse -Filter '*.bin' -ErrorAction SilentlyContinue
 foreach ($pf in $payloadFiles) {
     $destBin = Join-Path $BinDir $pf.Name
@@ -205,11 +228,6 @@ foreach ($pf in $payloadFiles) {
 
 Print "Installed -> $installedExe"
 
-# Verify the installed binary works. Use --version (handled by clap before
-# any application logic) so the check succeeds even if a re-exec path would
-# otherwise interfere with subcommand parsing.
-# Brief pause: Windows SmartScreen / Defender may need a moment to allow a
-# freshly-copied executable to run.
 Start-Sleep -Milliseconds 500
 try {
   $proc = Start-Process -FilePath "$BinDir\alphacode.exe" -ArgumentList '--version' `
@@ -239,7 +257,15 @@ try {
   }
 }
 
-if (-not $NoPath) {
+if (-not $NoPath -and -not $SkipPathUpdate) {
+  Write-Host ""
+  Update-UserPath -BinDir $BinDir
+  Write-Host ""
+  Write-Host "alphacode is ready to use! Run the following commands:" -ForegroundColor Green
+  Write-Host "  alphacode login"
+  Write-Host "  alphacode"
+  Write-Host ""
+} elseif (-not $NoPath) {
   $haveIt = ($env:PATH -split [IO.Path]::PathSeparator) | Where-Object { $_ -ieq $BinDir } | Select-Object -First 1
   if (-not $haveIt) {
     Write-Host ""
